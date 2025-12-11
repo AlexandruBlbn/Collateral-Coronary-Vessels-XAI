@@ -1,0 +1,5 @@
+data/
+lightning_logs/
+__pycache__/
+*.pth
+.DS_Store
