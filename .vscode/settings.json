@@ -1,0 +1,5 @@
+{
+    "terminal.integrated.gpuAcceleration": "off",
+    "terminal.integrated.rendererType": "dom",
+    "terminal.integrated.defaultProfile.windows": "Command Prompt"
+}

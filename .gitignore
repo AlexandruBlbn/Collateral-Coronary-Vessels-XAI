@@ -3,7 +3,7 @@ data/ARCADE/Test/
 data/ARCADE/train/
 data/ARCADE/Validation/
 data/ARCADE/__pycache__/
-
+data/ARCADE/RAW
 lightning_logs/
 __pycache__/
 *.pth
