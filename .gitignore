@@ -5,6 +5,7 @@ data/ARCADE/Validation/
 data/ARCADE/__pycache__/
 data/ARCADE/RAW
 lightning_logs/
+.vscode/
 __pycache__/
 *.pth
 .DS_Store
