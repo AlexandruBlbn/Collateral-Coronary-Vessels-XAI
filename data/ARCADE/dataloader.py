@@ -10,6 +10,7 @@ import seaborn as sb
 import pandas as pd
 import matplotlib.pyplot as plt
 import cv2
+from pathlib import Path
 
 def zscore_normalize(data):
     mean = np.mean(data)
@@ -661,55 +662,115 @@ def test():
 
 class ArcadeCoronarySegmentation(Dataset):
     """
-    Dataset class pentru segmentările vaselor coronariene.
-    Încarcă doar pacienții care au coronary_label în dataset.json (pacienți din syntax, 1001-2000).
+    Dataset class pentru segmentările vaselor coronariene (syntax dataset).
+    Încarcă pacienții din categoria 'segmentare' din dataset.json procesat.
     """
     def __init__(self, path, split='train', augment=False):
         with open(path, 'r') as f:
             self.data = json.load(f)
-        self.root_path = os.path.dirname(path) + '\\'
+        # Base path should be the parent of "processed" folder
+        self.base_path = Path(path).parent.parent  # Go up from dataset.json -> processed -> ARCADE
         self.split = split
         self.augment = augment
         
-        all_samples = list(self.data[split].values())
-        self.samples = [s for s in all_samples if s.get('coronary_label') is not None]
+        # Map split names
+        split_map = {'train': 'train', 'val': 'validation', 'validation': 'validation', 'test': 'test'}
+        dataset_split = split_map.get(split, 'train')
         
-        # Printează doar în procesul principal (main process), nu în workers
-
+        # Get segmentare samples from new dataset structure
+        self.samples = list(self.data[dataset_split]['segmentare'].items())
+        
+        # print(f"[CoronarySegmentation] Loaded {len(self.samples)} samples from {dataset_split} split")
 
     def __len__(self):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        pacient = self.samples[idx]
+        patient_id, patient_data = self.samples[idx]
         
-        # Încarcă imaginea
-        img_path = pacient['data'].replace('src\\data\\processed\\ARCADE\\', self.root_path)
+        # Construct full paths
+        img_path = self.base_path / patient_data['data']
+        label_path = self.base_path / patient_data['label']
+        
+        # Load image
         img = Image.open(img_path).convert('L')
-        
-        # Redimensionează la 256x256
         img = img.resize((256, 256), Image.BILINEAR)
         img_array = np.array(img)
         
-        # Încarcă label-ul coronariene
-        if pacient.get('coronary_label') is None:
-            # Fallback - nu ar trebui să ajungem aici datorită filtrării din __init__
-            label_array = np.zeros((256, 256), dtype=np.uint8)
-        else:
-            coronary_label_path = pacient['coronary_label'].replace('src\\data\\processed\\ARCADE\\', self.root_path)
-            label = Image.open(coronary_label_path).convert('L')
-            # Redimensionează label-ul la 256x256 (folosind NEAREST pentru label-uri)
-            label = label.resize((256, 256), Image.NEAREST)
-            label_array = np.array(label)
+        # Load label (vessel segmentation)
+        label = Image.open(label_path).convert('L')
+        label = label.resize((256, 256), Image.NEAREST)
+        label_array = np.array(label)
         
-        # Aici poți adăuga preprocesare sau augmentări
-        # blur -> clahe -> zscore
+        # Preprocessing: Gaussian blur -> CLAHE -> Z-score normalization
+        # if self.augment:
+        #     # img_array = cv2.GaussianBlur(img_array, (3, 3), 2)
+        #     img_array = cv2.createCLAHE(clipLimit=2, tileGridSize=(8, 8)).apply(img_array)
         
-        # Exemplu de returnare simplă (decomentează când vrei să folosești):
-        # data = torch.from_numpy(img_array).float().unsqueeze(0)
-        # label = torch.from_numpy(label_array).float().unsqueeze(0)
-        # label = (label > 0).float()
-        # return data, label
+        # img_array = zscore_normalize_image(img_array)
         
-        return img_array, label_array
+        # Convert to tensors
+        data = torch.from_numpy(img_array).float().unsqueeze(0)
+        label = torch.from_numpy(label_array).float().unsqueeze(0)
+        label = (label > 0).float()
+        
+        return data, label
+
+
+def test_coronary_segmentation():
+    """Test function for ArcadeCoronarySegmentation dataset"""
+    dataset_path = r'D:\Collateral Coronary Vessels XAI\data\ARCADE\processed\dataset.json'
+    
+    print("Testing ArcadeCoronarySegmentation...")
+    
+    # Test train split
+    train_dataset = ArcadeCoronarySegmentation(dataset_path, split='train', augment=True)
+    print(f"Train dataset size: {len(train_dataset)}")
+    
+    # Test dataloader
+    dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
+    
+    for i, (data, label) in enumerate(dataloader):
+        print(f"\nBatch {i+1}:")
+        print(f"  Data shape: {data.shape}")
+        print(f"  Label shape: {label.shape}")
+        print(f"  Data range: [{data.min():.3f}, {data.max():.3f}]")
+        print(f"  Label unique values: {torch.unique(label).numpy()}")
+        
+        # Visualize first sample
+        if i == 0:
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+            image = data[0, 0].numpy()
+            mask = label[0, 0].numpy()
+            
+            # Create overlay
+            overlay = np.stack([image, image, image], axis=-1)
+            overlay = ((overlay - overlay.min()) / (overlay.max() - overlay.min()) * 255).astype(np.uint8)
+            overlay[mask > 0] = [0, 255, 0]
+            
+            axes[0].imshow(image, cmap='gray')
+            axes[0].set_title('Coronary Image (Preprocessed)')
+            axes[0].axis('off')
+            
+            axes[1].imshow(mask, cmap='gray')
+            axes[1].set_title('Coronary Vessels Label')
+            axes[1].axis('off')
+            
+            axes[2].imshow(overlay)
+            axes[2].set_title('Overlay (vessels in green)')
+            axes[2].axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(r'D:\Collateral Coronary Vessels XAI\data\ARCADE\processed\coronary_test.png', dpi=150)
+            print("\nVisualization saved to: coronary_test.png")
+            plt.show()
+        
+        if i >= 2:  # Test only 3 batches
+            break
+    
+    print("\n[OK] Test completed successfully!")
+
+# Uncomment to test:
+# test_coronary_segmentation()
 
