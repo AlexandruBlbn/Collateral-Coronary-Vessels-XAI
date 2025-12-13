@@ -220,79 +220,97 @@ class ARCADEDataset(Dataset):
         '''
         with open(json_path, 'r') as f:
             self.data = json.load(f)
-        self.split = split
-        self.task = task
-        self.transform = transform
-        self.samples = []
-        
-        if task == 'SegStenoza':
-            for patient_id, pacienti in self.data[split]['stenoza'].items():
-                self.samples.append((pacienti['data'], pacienti['label'], 'stenoza'))
-        elif task == 'SegCoronare':
-            for patient_id, pacienti in self.data[split]['segmentare'].items():
-                self.samples.append((pacienti['data'], pacienti['label'], 'coronare'))
-        elif task == 'Clasificare':
-            # Stenoza = 1
-            for patient_id, pacienti in self.data[split]['stenoza'].items():
-                self.samples.append((pacienti['data'], 1))
-            # Coronare = 0
-            for patient_id, pacienti in self.data[split]['segmentare'].items():
-                self.samples.append((pacienti['data'], 0))  
-                    
+            self.split = split
+            self.task = task
+            self.transform = transform
+            self.samples = []
+            
+            if task == 'SegStenoza':
+                for patient_id, pacienti in self.data[split]['stenoza'].items():
+                    self.samples.append((pacienti['data'], pacienti['label']))
+            elif task == 'SegCoronare':
+                for patient_id, pacienti in self.data[split]['segmentare'].items():
+                    self.samples.append((pacienti['data'], pacienti['label']))
+            elif task == 'Clasificare':
+                if 'stenoza' in self.data[split]:
+                    for patient_id, pacienti in self.data[split]['stenoza'].items():
+                        self.samples.append((pacienti['data'], 1))
+                if 'segmentare' in self.data[split]:
+                    for patient_id, pacienti in self.data[split]['segmentare'].items():
+                        self.samples.append((pacienti['data'], 0))      
+            elif task == 'Unsupervised':
+                if 'stenoza' in self.data[split]:
+                    for patient_id, pacienti in self.data[split]['stenoza'].items():
+                        self.samples.append((pacienti['data'], None))
+                if 'segmentare' in self.data[split]:
+                    for patient_id, pacienti in self.data[split]['segmentare'].items():
+                        self.samples.append((pacienti['data'], None))
+
     def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-      samples = self.samples[idx]
-      image_path = os.path.join("data/ARCADE/", samples[0])  
-      image = Image.open(image_path).convert('L')
-      image = image.resize((256, 256), Image.LANCZOS)
-      image = np.array(image, dtype=np.float32)
-      image = image / 255.0
-      
-      if self.task == 'SegStenoza':
-          label_path = os.path.join("data/ARCADE/", samples[1])
-          label = Image.open(label_path).convert('L')
-          label = label.resize((256, 256), Image.NEAREST)
-          label = np.array(label, dtype=np.float32)
-          label = label / 255.0
-          
-          if self.transform:
-              augmented = self.transform(image=image, mask=label)
-              image = augmented['image']
-              label = augmented['mask']
-          
-          image = torch.tensor(image).unsqueeze(0) 
-          label = torch.tensor(label).unsqueeze(0) 
-          
-          return image, label #return tensor
-      
-      elif self.task == 'SegCoronare':
-          label_path = os.path.join("data/ARCADE/", samples[1])
-          label = Image.open(label_path).convert('L')
-          label = label.resize((256, 256), Image.NEAREST)
-          label = np.array(label, dtype=np.float32)
-          label = label / 255.0
-          
-          if self.transform:
-              augmented = self.transform(image=image, mask=label)
-              image = augmented['image']
-              label = augmented['mask']
-          
-          image = torch.tensor(image).unsqueeze(0) 
-          label = torch.tensor(label).unsqueeze(0) 
-          
-          return image, label #return tensor
-      
-      elif self.task == 'Clasificare':
-            label = samples[1]
-            
-            if self.transform:
-                augmented = self.transform(image=image)
-                image = augmented['image']
-            
-            image = torch.tensor(image).unsqueeze(0) 
-            label = torch.tensor(label, dtype=torch.long)
-            
-            return image, label #return tensor
+            return len(self.samples)
         
+    def __getitem__(self, idx):
+            samples = self.samples[idx]
+            image_path = os.path.join("data/ARCADE/", samples[0])  
+            image = Image.open(image_path).convert('L')
+            image = image.resize((256, 256), Image.LANCZOS)
+            image = np.array(image, dtype=np.float32)
+            image = image / 255.0
+            
+            if self.task == 'SegStenoza':
+                label_path = os.path.join("data/ARCADE/", samples[1])
+                label = Image.open(label_path).convert('L')
+                label = label.resize((256, 256), Image.NEAREST)
+                label = np.array(label, dtype=np.float32)
+                label = label / 255.0
+                label = (label > 0.5).astype(np.float32)
+                
+                if self.transform:
+                    augmented = self.transform(image=image, mask=label)
+                    image = augmented['image']
+                    label = augmented['mask']
+                
+                image = torch.tensor(image).unsqueeze(0) 
+                label = torch.tensor(label).unsqueeze(0) 
+                
+                return image, label
+            
+            elif self.task == 'SegCoronare':
+                label_path = os.path.join("data/ARCADE/", samples[1])
+                label = Image.open(label_path).convert('L')
+                label = label.resize((256, 256), Image.NEAREST)
+                label = np.array(label, dtype=np.float32)
+                label = label / 255.0
+                label = (label > 0.5).astype(np.float32)
+                
+                if self.transform:
+                    augmented = self.transform(image=image, mask=label)
+                    image = augmented['image']
+                    label = augmented['mask']
+                
+                image = torch.tensor(image).unsqueeze(0) 
+                label = torch.tensor(label).unsqueeze(0) 
+                
+                return image, label
+            
+            elif self.task == 'Clasificare':
+                label = samples[1]
+                
+                if self.transform:
+                    augmented = self.transform(image=image)
+                    image = augmented['image']
+                
+                image = torch.tensor(image).unsqueeze(0) 
+                label = torch.tensor(label, dtype=torch.long)
+                
+                return image, label
+            
+            elif self.task == 'Unsupervised':
+                if self.transform:
+                    augmented = self.transform(image=image)
+                    image = augmented['image']
+                
+                image = torch.tensor(image).unsqueeze(0) 
+                
+                return image
+            
