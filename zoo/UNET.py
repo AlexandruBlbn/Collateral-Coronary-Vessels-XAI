@@ -4,7 +4,6 @@ import torchvision
 import torchsummary as summary
 
 def DoubleConv(in_channels, out_channels, norm_layer=nn.InstanceNorm2d):
-    """DoubleConv cu InstanceNorm (mai bun pentru batch size mic)"""
     return nn.Sequential(
         nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
         norm_layer(out_channels),
@@ -46,7 +45,7 @@ class UNet(nn.Module):
 
 
     def forward(self, x):
-        # Encoder cu MaxPool
+
         enc1 = self.enc1(x)
         x = self.max_pool2d(enc1)
         
@@ -64,19 +63,19 @@ class UNet(nn.Module):
         
         # Decoder cu skip connections
         x = self.upconv4(bottleneck)
-        x = torch.cat([x, enc4], dim=1)  # Skip connection
+        x = torch.cat([x, enc4], dim=1)  
         x = self.dec4(x)
         
         x = self.upconv3(x)
-        x = torch.cat([x, enc3], dim=1)  # Skip connection
+        x = torch.cat([x, enc3], dim=1)  
         x = self.dec3(x)
         
         x = self.upconv2(x)
-        x = torch.cat([x, enc2], dim=1)  # Skip connection
+        x = torch.cat([x, enc2], dim=1)  
         x = self.dec2(x)
         
         x = self.upconv1(x)
-        x = torch.cat([x, enc1], dim=1)  # Skip connection
+        x = torch.cat([x, enc1], dim=1) 
         x = self.dec1(x)
         
         # Output layer
