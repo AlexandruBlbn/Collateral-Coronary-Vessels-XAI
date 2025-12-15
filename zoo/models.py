@@ -1,7 +1,7 @@
 import torch.nn as nn
 import torch
 import numpy as np
-from zoo.backbones import get_backbone
+from backbones import get_backbone
 
 #headuri etc
 
@@ -14,6 +14,7 @@ class upBlock(nn.Module):
             nn.BatchNorm2d(in_channels),
             nn.SiLU(inplace=True),
         )
+        
     def forward(self, x):
         x = self.upsample(x)
         x = self.conv(x)
@@ -22,7 +23,18 @@ class upBlock(nn.Module):
 class SegmentatorCoronare(nn.Module):
     def __init__(self, backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1):
         super().__init__()
-        self.backbone = get_backbone(model_name=backbone, in_channels=in_channels, pretrained=pretrained)
+        self.backbone = get_backbone(model_name=backbone, in_channels=in_channels, pretrained=pretrained, summary=False)
         
         #todo: verificare pentru outputurile backbone-urilor ca sa seteze corect head-ul
+        with torch.no_grad():
+            dummy = torch.randn(1, 1, 256, 256)
+            feats = self.backbone(dummy)
+            enc_channels = feats.shape[1] #384 sau 768
+            enc_size = feats.shape[2] #16 sau 8
+            print(f'channels: {enc_channels}, size: {enc_size}')
+        
+        
+            
+seg = SegmentatorCoronare(backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1)
+
     

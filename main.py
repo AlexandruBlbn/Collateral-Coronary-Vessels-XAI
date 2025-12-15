@@ -21,6 +21,7 @@ taskuri:
 SegStenoza
 SegCoronare
 Clasificare
+Unsupervised
 '''
 
 train_dataset = ARCADEDataset(dataset_path, split='train', task='SegCoronare')
