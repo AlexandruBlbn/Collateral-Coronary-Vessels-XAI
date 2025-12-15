@@ -10,8 +10,8 @@ class upBlock(nn.Module):
         super().__init__()
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
             nn.SiLU(inplace=True),
         )
         
@@ -33,8 +33,79 @@ class SegmentatorCoronare(nn.Module):
             enc_size = feats.shape[2] #16 sau 8
             print(f'channels: {enc_channels}, size: {enc_size}')
         
-        
+        curr_size = enc_size
+        curr_channels = enc_channels
+        layers = []
+        target_size = 256
+        while curr_size < target_size:
+            out_ch = max(64,curr_channels // 2)
+            layers.append(upBlock(curr_channels, out_ch))
+            curr_channels = out_ch
+            curr_size = curr_size * 2
             
-seg = SegmentatorCoronare(backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1)
+        self.decoder = nn.Sequential(*layers)
+        self.head = nn.Conv2d(curr_channels, 1, kernel_size=1)
+        
+    def forward(self, x):
+        feats = self.backbone(x)
+        x = self.decoder(feats)
+        x = self.head(x)
+        return x
+    
+    
+    
+class headClasificare(nn.Module):
+    def __init__(self, in_features, num_classes):
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(in_features, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes)
+        )
+    
+    def forward(self, x):
+        return self.classifier(x)
+    
+    
+class ClasificatorStenoza(nn.Module):
+    def __init__(self, backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1, num_classes=2):
+        super().__init__()
+        self.backbone = get_backbone(model_name=backbone, in_channels=in_channels, pretrained=pretrained, summary=False)
+        with torch.no_grad():
+            dummy = torch.randn(1, 1, 256, 256)
+            feats = self.backbone(dummy)
+            enc_channels = feats.shape[1] #384 sau 768
+            print(f'channels: {enc_channels}')
+        self.head = headClasificare(in_features=enc_channels, num_classes=num_classes)
+    
+    def forward(self, x):
+        feats = self.backbone(x)
+        x = self.head(feats)
+        return x
+            
+# seg = SegmentatorCoronare(backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1)
 
     
+
+#     print("SWIN")
+#     model = SegmentatorCoronare(backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1)
+#     dummy = torch.randn(2, 1, 256, 256)
+#     out = model(dummy)
+#     print(out.shape)
+    
+    
+#     print('ConvNext')
+#     model = SegmentatorCoronare(backbone='convnext_tiny', pretrained=False, in_channels=1)
+#     dummy = torch.randn(2, 1, 256, 256)
+#     out = model(dummy)
+#     print(out.shape)
+    
+#     print('ViT')
+#     model = SegmentatorCoronare(backbone='vit_small_patch16_224', pretrained=False, in_channels=1)
+#     dummy = torch.randn(2, 1, 256, 256)
+#     out = model(dummy)
+#     print(out.shape)

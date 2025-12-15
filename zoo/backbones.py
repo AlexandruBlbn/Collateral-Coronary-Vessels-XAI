@@ -125,4 +125,4 @@ def sanityCheck():
     print(f'Swin output shape: {swin_out.shape}') #1 768 8 8
     print(f'ConvNeXT output shape: {convnext_out.shape}') #1 768 8 8
     
-sanityCheck()
+# sanityCheck()
