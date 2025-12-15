@@ -57,17 +57,22 @@ class SegmentatorCoronare(nn.Module):
 class headClasificare(nn.Module):
     def __init__(self, in_features, num_classes):
         super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1) #mean global
+        self.max_pool = nn.AdaptiveMaxPool2d(1) #extract stenoza
+        flatt_features = in_features * 2    
         self.classifier = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(in_features, 128),
-            nn.BatchNorm1d(128),
+            nn.Linear(flatt_features,256    ),
+            nn.BatchNorm1d(256),
             nn.SiLU(),
             nn.Dropout(0.5),
-            nn.Linear(128, num_classes)
+            nn.Linear(256, num_classes)
         )
     
     def forward(self, x):
+        x_average = self.avg_pool(x)
+        x_max = self.max_pool(x)
+        x = torch.cat([x_average, x_max], dim=1)
         return self.classifier(x)
     
     

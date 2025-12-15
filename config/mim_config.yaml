@@ -1,0 +1,22 @@
+experiment_name: "simmim_pretrain_v1"
+
+model:
+  backbone: "swinv2_tiny_window16_256"
+  input_size: 256
+
+data:
+  batch_size: 32        
+  num_workers: 4       
+  mask_patch_size: 32  
+  mask_ratio: 0.6      
+  in_channels: 1     
+
+optimizer:
+  lr: 5.0e-4            
+  weight_decay: 0.05
+  epochs: 100           
+
+system:
+  device: "cuda"
+  seed: 42
+  save_dir: "./checkpoints/mim/"

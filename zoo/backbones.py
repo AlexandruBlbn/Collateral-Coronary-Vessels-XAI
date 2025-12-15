@@ -33,7 +33,7 @@ class SWIN_permute(nn.Module):
 
 
 
-def get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, summary=False):
+def get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, print_summary=False):
     '''
     Docstring for get_backbone
     
@@ -103,7 +103,7 @@ def get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, su
         if 'swin' in model_name:
             model = SWIN_permute(model)
                 
-    if summary == True:
+    if print_summary == True:
         print(summary(model, (1, in_channels, 256, 256)))
     
     
@@ -111,18 +111,18 @@ def get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, su
 
 
 def sanityCheck():
-    vit_model = get_backbone(model_name='vit_small_patch16_224', in_channels=1, pretrained=False, summary=False)
-    swin_model = get_backbone(model_name='swinv2_tiny_window16_256', in_channels=1, pretrained=False, summary=False)
-    convnext_model = get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, summary=False)
+    vit_model = get_backbone(model_name='vit_small_patch16_224', in_channels=1, pretrained=False, print_summary=True)
+    # swin_model = get_backbone(model_name='swinv2_tiny_window16_256', in_channels=1, pretrained=False, summary=False)
+    # convnext_model = get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, summary=False)
     
     x = torch.randn((1, 1, 256, 256))
     
-    vit_out = vit_model(x)
-    swin_out = swin_model(x)
-    convnext_out = convnext_model(x)
+    # vit_out = vit_model(x)
+    # swin_out = swin_model(x)
+    # convnext_out = convnext_model(x)
     
-    print(f'ViT output shape: {vit_out.shape}') #1 384 16 16
-    print(f'Swin output shape: {swin_out.shape}') #1 768 8 8
-    print(f'ConvNeXT output shape: {convnext_out.shape}') #1 768 8 8
+    # print(f'ViT output shape: {vit_out.shape}') #1 384 16 16
+    # print(f'Swin output shape: {swin_out.shape}') #1 768 8 8
+    # print(f'ConvNeXT output shape: {convnext_out.shape}') #1 768 8 8
     
 # sanityCheck()
