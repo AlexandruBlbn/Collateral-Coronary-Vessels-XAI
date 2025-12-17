@@ -2,11 +2,10 @@
 
 import torch
 import torch.nn as nn
-from dataloader import ARCADEDataset
 import torchvision
 import numpy as np
 from torch.utils.data import Dataset
-from dataloader import ARCADEDataset
+from data.ARCADE.dataloader import ARCADEDataset
 from torch.utils.data import DataLoader
 import json
 from PIL import Image
@@ -46,5 +45,3 @@ class ArcadeDatasetMIM():
     
     
 
-
-    
