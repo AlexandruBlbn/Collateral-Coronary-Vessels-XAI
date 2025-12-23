@@ -95,11 +95,8 @@ def save_plotting_samples(model, loader, epoch, save_dir, device, num_samples=40
                 
             imgs = imgs.to(device)
             masks = masks.to(device)
-            
-            # Logica Inversata
+
             masks = 1 - masks 
-            
-            # Fara autocast (FP32)
             _, rec_imgs = model(imgs, masks)
             
             batch_size = imgs.shape[0]
@@ -110,14 +107,11 @@ def save_plotting_samples(model, loader, epoch, save_dir, device, num_samples=40
                 orig_img = imgs[i, 0].cpu().numpy()
                 rec_raw = rec_imgs[i, 0].cpu().float().numpy()
                 mask_np = masks[i].cpu().numpy()
-                
-                # Amplificare Vizuala (doar daca e foarte intunecat)
                 if rec_raw.max() < 0.1 and rec_raw.max() > 0:
                      rec_viz = (rec_raw - rec_raw.min()) / (rec_raw.max() - rec_raw.min() + 1e-6)
                 else:
                      rec_viz = rec_raw
 
-                # Combinare: Original + Reconstructie
                 part_original = orig_img * (1 - mask_np)
                 part_reconstructed = rec_viz * mask_np
                 combined_img = part_original + part_reconstructed
@@ -145,7 +139,7 @@ def save_plotting_samples(model, loader, epoch, save_dir, device, num_samples=40
         return grid
     return None
 
-# --- 6. TRAINING LOOP (STABLE FP32 + SCHEDULER) ---
+
 def train():
     device = setupSystem()
     print(f"--> Training on Device: {device}")
@@ -167,9 +161,7 @@ def train():
         backbone_name=config['model']['backbone'],
         in_channels=config['data']['in_channels']
     ).to(device)
-    
-    # --- OPTIMIZER SETUP ---
-    # Folosim LR=1e-3 ca start (bazat pe debug)
+
     start_lr = 1e-3
     print(f"--> Optimizer Initial LR: {start_lr}")
     
@@ -179,20 +171,16 @@ def train():
         weight_decay=float(config['optimizer']['weight_decay'])
     )
     
-    # --- SCHEDULER RE-ACTIVAT ---
-    # Va scadea LR de la 1e-3 pana la 1e-6 pe durata epocilor
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, 
         T_max=config['optimizer']['epochs'], 
         eta_min=1e-6
     )
-    print("--> Scheduler Activated: CosineAnnealingLR")
     
     best_loss = float('inf')
     epochs = config['optimizer']['epochs']
     global_step = 0
-    
-    print("--> Starting STABLE Pre-training Loop (FP32)...")
+
 
     for epoch in range(epochs):
         model.train()
@@ -202,13 +190,9 @@ def train():
         for imgs, masks in loop:
             imgs = imgs.to(device)
             masks = masks.to(device)
-            
-            # Logica Inversata
             masks = 1 - masks 
-            
             optimizer.zero_grad()
-            
-            # --- MOD STABIL (FP32) ---
+
             loss, rec_imgs = model(imgs, masks)
             loss.backward()
             optimizer.step()
@@ -220,18 +204,15 @@ def train():
             global_step += 1
             
         avg_loss = running_loss / len(train_loader)
-        
-        # Facem step la Scheduler la final de epoca
+
         scheduler.step()
-        
-        # Monitorizam LR-ul actualizat
+
         current_lr = optimizer.param_groups[0]['lr']
         
         writer.add_scalar('Loss/train_epoch', avg_loss, epoch)
         writer.add_scalar('Learning_Rate', current_lr, epoch)
         print(f"Epoch {epoch+1} finished. Avg Loss: {avg_loss:.5f} | LR: {current_lr:.2e}")
         
-        # Save Best Backbone
         if avg_loss < best_loss:
             best_loss = avg_loss
             full_state = model.state_dict()
@@ -243,7 +224,6 @@ def train():
             best_full_path = os.path.join(save_dir, f"{config['experiment_name']}_full_best.pth")
             torch.save(full_state, best_full_path)
 
-        # Plotting la fiecare epoca
         tb_grid = save_plotting_samples(model, train_loader, epoch, log_dir, device, num_samples=40)
         if tb_grid is not None:
             writer.add_image('Reconstruction_Samples_Grid', tb_grid, global_step=epoch)
