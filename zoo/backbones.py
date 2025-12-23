@@ -26,7 +26,7 @@ class SWIN_permute(nn.Module):
         self.model = swin_model
     def forward(self, x):
         x = self.model.forward_features(x) #b, n_tokene, dim
-        return x.permute(0,3,2,1)
+        return x.permute(0,3,1,2)
 
 
 

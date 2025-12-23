@@ -15,7 +15,7 @@ import torch.optim as optim
 from utils.helpers import set_seed
 import torch
 import tqdm
-from zoo.mim import 
+from zoo.mim import SimMIM
 
 
 
@@ -74,78 +74,46 @@ data_loader = get_mim_dataloader(
     batch_size=config['data']['batch_size']
 )
 
-
-def train(epochs = config['optimizer']['epochs']):
-    running_loss = 0.0
+#epochs = config['optimizer']['epochs']
+def train():
     device = setupSystem()
-    optimizier = optimizer(
-        lr=config['optimizer']['lr'], 
-        weight_decay=config['optimizer']['weight_decay']
+    print("device: "    , device)
+    
+    json_path = r'D:\Collateral Coronary Vessels XAI\data\ARCADE\processed\dataset.json'
+    train_loader = get_mim_dataloader(
+        json_path=json_path,
+        batch_size=config['data']['batch_size']
     )
+    model = SimMIM(
+        backbone_name=config['model']['backbone_name'],
+        in_channels=config['model']['in_channels']
+    ).to(device)
+    optimizer = optim.AdamW(
+        params=model.parameters(),
+        lr=float(config['optimizer']['lr']),
+        weight_decay=float(config['optimizer']['weight_decay'])
+    )
+    epochs = config['optimizer']['epochs']
+    save_dir = config['system']['save_dir']
+    os.makedirs(save_dir, exist_ok=True)
     
     for epoch in range(epochs):
+        model.train()
+        running_loss = 0
+        loop = tqdm.tqdm(train_loader, desc=f"Epoch [{epoch+1}/{epochs}]")
         
+        for imgs, masks in loop:
+            imgs = imgs.to(device)
+            masks = masks.to(device)
+            
+            optimizer.zero_grad()
+            loss, img_recreate = model(imgs, masks)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+            loop.set_postfix(loss=loss.item())
+            
+        avg_loss = running_loss / len(train_loader)
+        print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}")
     
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# if __name__ == "__main__":
-#     loader = get_mim_dataloader(r"D:\Collateral Coronary Vessels XAI\data\ARCADE\processed\dataset.json")
-#     imgs, masks = next(iter(loader))
-
-#     print(f"img: {imgs.shape}") # [32, 1, 256, 256]
-#     print(f"masca:  {masks.shape}") # [32, 256, 256]
-    
-#     fig, axes = plt.subplots(2, 4, figsize=(12, 6))
-#     for i in range(8):
-#         row = i // 4
-#         col = i % 4
-#         ax = axes[row, col]
-        
-#         img = imgs[i].cpu().numpy().squeeze()  # [256, 256]
-#         mask = masks[i].cpu().numpy()  # [256, 256]
-        
-#         masked_img = img * mask
-        
-#         ax.imshow(masked_img, cmap='gray')
-#         ax.set_title(f"Sample {i+1}")
-#         ax.axis('off')
-    
-#     plt.tight_layout()
-#     plt.show()
+=
