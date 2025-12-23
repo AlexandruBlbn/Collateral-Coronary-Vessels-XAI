@@ -1,4 +1,4 @@
-# data/  <-- Am scos asta ca sa permitem fisierele din data
+
 data/ARCADE/Test/
 data/ARCADE/train/
 data/ARCADE/Validation/
@@ -6,6 +6,7 @@ data/ARCADE/__pycache__/
 data/ARCADE/RAW
 data/ARCADE/processed
 lightning_logs/
+runs
 .vscode/
 __pycache__/
 *.pth
