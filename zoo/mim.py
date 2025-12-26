@@ -22,7 +22,8 @@ class SimMIM(nn.Module):
                 out_channels=(encoder_stride ** 2) * in_channels, 
                 kernel_size=1
             ),
-            nn.PixelShuffle(encoder_stride) 
+            nn.PixelShuffle(encoder_stride),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
         )
         
     def forward(self, x, mask):

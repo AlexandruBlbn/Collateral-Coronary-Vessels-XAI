@@ -96,7 +96,6 @@ def save_plotting_samples(model, loader, epoch, save_dir, device, num_samples=40
             imgs = imgs.to(device)
             masks = masks.to(device)
 
-            masks = 1 - masks 
             _, rec_imgs = model(imgs, masks)
             
             batch_size = imgs.shape[0]
@@ -189,7 +188,6 @@ def train():
         for imgs, masks in loop:
             imgs = imgs.to(device)
             masks = masks.to(device)
-            masks = 1 - masks 
             optimizer.zero_grad()
 
             loss, rec_imgs = model(imgs, masks)
