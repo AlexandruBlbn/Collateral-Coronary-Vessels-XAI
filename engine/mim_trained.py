@@ -162,8 +162,7 @@ def train():
         in_channels=config['data']['in_channels']
     ).to(device)
 
-    start_lr = 1e-3
-    print(f"--> Optimizer Initial LR: {start_lr}")
+    start_lr = 1e-4
     
     optimizer = optim.AdamW(
         model.parameters(),
@@ -235,7 +234,7 @@ def train():
     flat_config = flatten_config(config)
     writer.add_hparams(flat_config, {'hparam/loss': best_loss})
     writer.close()
-    print("--> Training Complete.")
+    print("Train complete")
 
 if __name__ == "__main__":
     train()
