@@ -161,9 +161,14 @@ def train():
     train_loader = get_mim_dataloader(json_path, batch_size=config['data']['batch_size'])
     print(f"--> Initializing SimMIM Backbone: {config['model']['backbone']}")
     
+    encoder_stride = 32
+    if 'vit' in config['model']['backbone']:
+        encoder_stride = 16
+        
     model = SimMIM(
         backbone_name=config['model']['backbone'],
-        in_channels=config['data']['in_channels']
+        in_channels=config['data']['in_channels'],
+        encoder_stride=encoder_stride
     ).to(device)
 
     start_lr = 1e-4
