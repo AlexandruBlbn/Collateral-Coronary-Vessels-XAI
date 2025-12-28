@@ -1,7 +1,7 @@
-experiment_name: "simmim_pretrain_v1"
+experiment_name: "simmim_pretrain_convnext_v1"
 
 model:
-  backbone: "swinv2_tiny_window16_256"
+  backbone: "convnext_tiny"
   input_size: 256
 
 data:

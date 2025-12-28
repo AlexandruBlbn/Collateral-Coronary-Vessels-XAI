@@ -7,7 +7,10 @@ data/ARCADE/RAW
 data/ARCADE/processed
 lightning_logs/
 runs
+Documentatie.docx
+~$cumentatie.docx
 .vscode/
 __pycache__/
 *.pth
 .DS_Store
+~$cumentatie.docx

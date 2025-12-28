@@ -3,6 +3,7 @@ import os
 import torch
 import torch.optim as optim
 import yaml
+import json
 import numpy as np
 import torchvision
 import matplotlib.pyplot as plt
@@ -143,11 +144,15 @@ def train():
     device = setupSystem()
     print(f"--> Training on Device: {device}")
     
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_name = f"{config['experiment_name']}_{timestamp}"
+
+    run_name = f"{config['experiment_name']}"
     log_dir = os.path.join(project_root, 'runs', run_name)
     writer = SummaryWriter(log_dir=log_dir)
     print(f"--> Logs saving to: {log_dir}")
+
+    # Save config as JSON
+    with open(os.path.join(log_dir, 'config.json'), 'w') as f:
+        json.dump(config, f, indent=4)
 
     json_path = os.path.join(project_root, 'data', 'ARCADE', 'processed', 'dataset.json')
     save_dir = config['system']['save_dir']
@@ -224,10 +229,6 @@ def train():
         tb_grid = save_plotting_samples(model, train_loader, epoch, log_dir, device, num_samples=40)
         if tb_grid is not None:
             writer.add_image('Reconstruction_Samples_Grid', tb_grid, global_step=epoch)
-
-        if (epoch + 1) % 5 == 0:
-            ckpt_path = os.path.join(save_dir, f"{config['experiment_name']}_epoch_{epoch+1}.pth")
-            torch.save(model.state_dict(), ckpt_path)
 
     flat_config = flatten_config(config)
     writer.add_hparams(flat_config, {'hparam/loss': best_loss})
