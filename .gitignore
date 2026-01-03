@@ -14,3 +14,5 @@ __pycache__/
 *.pth
 .DS_Store
 ~$cumentatie.docx
+vasomim_results
+vessel_extraction.py
