@@ -16,3 +16,11 @@ __pycache__/
 ~$cumentatie.docx
 vasomim_results
 vessel_extraction.py
+vasomim_masks_clean
+vasomim_masks_only
+vasomim_plots
+binary_masks_output
+data/archive
+data/CADICA
+data/XCAD
+micelanios
