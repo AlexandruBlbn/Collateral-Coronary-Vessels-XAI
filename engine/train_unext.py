@@ -91,6 +91,22 @@ def save_predictions_to_tensorboard(model, loader, writer, epoch, device, num_sa
         grid = torchvision.utils.make_grid(images_list, nrow=1, padding=2, normalize=False)
         writer.add_image('Val/Predictions', grid, epoch)
 
+class BCEDiceLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bce = nn.BCEWithLogitsLoss()
+        
+    def forward(self, inputs, targets):
+        bce_loss = self.bce(inputs, targets)
+        
+        probs = torch.sigmoid(inputs)
+        intersection = (probs * targets).sum(dim=(2, 3))
+        union = probs.sum(dim=(2, 3)) + targets.sum(dim=(2, 3))
+        dice_score = (2. * intersection + 1e-6) / (union + 1e-6)
+        dice_loss = 1 - dice_score.mean()
+        
+        return 0.5 * bce_loss + dice_loss
+
 # --- 4. TRAINING LOOP ---
 def train():
     # System Setup
@@ -167,7 +183,8 @@ def train():
         base_channels=config['model']['base_channels'],
         depths=config['model']['depths'],
         mlp_ratio=config['model']['mlp_ratio'],
-        drop_rate=config['model']['drop_rate']
+        drop_rate=config['model']['drop_rate'],
+        attention=config['model'].get('attention', False)
     ).to(device)
     
     # Save model summary
@@ -181,12 +198,14 @@ def train():
         f.write(f"Model Config:\n{json.dumps(config['model'], indent=4)}\n")
 
     # Optimization
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = BCEDiceLoss()
     optimizer = optim.AdamW(
         model.parameters(),
         lr=float(config['optimizer']['lr']),
         weight_decay=float(config['optimizer']['weight_decay'])
     )
+    
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['optimizer']['epochs'], eta_min=1e-5)
     
     epochs = config['optimizer']['epochs']
     global_step = 0
@@ -220,6 +239,7 @@ def train():
         model.eval()
         val_loss = 0.0
         dice_fg_accum = 0.0
+        iou_fg_accum = 0.0
         dice_bg_accum = 0.0
         
         with torch.no_grad():
@@ -241,6 +261,10 @@ def train():
                 dice_fg = (2. * inter_fg + 1e-6) / (union_fg + 1e-6)
                 dice_fg_accum += dice_fg.mean().item()
                 
+                # IoU FG
+                iou_fg = (inter_fg + 1e-6) / (union_fg - inter_fg + 1e-6)
+                iou_fg_accum += iou_fg.mean().item()
+                
                 # Dice BG (Background)
                 preds_bg = 1 - preds
                 masks_bg = 1 - masks
@@ -251,15 +275,22 @@ def train():
         
         avg_val_loss = val_loss / len(val_loader)
         avg_dice_fg = dice_fg_accum / len(val_loader)
+        avg_iou_fg = iou_fg_accum / len(val_loader)
+        avg_f1_fg = avg_dice_fg # F1 score is equivalent to Dice coefficient for binary segmentation
         avg_dice_bg = dice_bg_accum / len(val_loader)
         mean_dice = (avg_dice_fg + avg_dice_bg) / 2.0
         
         writer.add_scalar('Val/Loss', avg_val_loss, epoch)
         writer.add_scalar('Val/Dice_Vessels', avg_dice_fg, epoch)
+        writer.add_scalar('Val/IoU_Vessels', avg_iou_fg, epoch)
+        writer.add_scalar('Val/F1_Vessels', avg_f1_fg, epoch)
         writer.add_scalar('Val/Dice_Background', avg_dice_bg, epoch)
         writer.add_scalar('Val/Mean_Dice', mean_dice, epoch)
         
-        print(f"    Val Loss: {avg_val_loss:.4f} | Dice Vessels: {avg_dice_fg:.4f} | Mean Dice: {mean_dice:.4f}")
+        scheduler.step()
+        writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], epoch)
+        
+        print(f"    Val Loss: {avg_val_loss:.4f} | Vessel Dice: {avg_dice_fg:.4f} | Mean Dice: {mean_dice:.4f} | IoU: {avg_iou_fg:.4f} | F1: {avg_f1_fg:.4f}")
 
         # Save Best Model by Mean Dice
         if mean_dice > best_mean_dice:

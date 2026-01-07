@@ -84,6 +84,35 @@ class StageBlock(nn.Module):
         return x
 
 
+class AttentionBlock(nn.Module):
+    def __init__(self, F_g, F_l, F_int):
+        super().__init__()
+        self.W_g = nn.Sequential(
+            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.BatchNorm2d(F_int)
+        )
+        
+        self.W_x = nn.Sequential(
+            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.BatchNorm2d(F_int)
+        )
+
+        self.psi = nn.Sequential(
+            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.BatchNorm2d(1),
+            nn.Sigmoid()
+        )
+        
+        self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, g, x):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        psi = self.relu(g1 + x1)
+        psi = self.psi(psi)
+        return x * psi
+
+
 class UNeXt(nn.Module):
     def __init__(
         self, 
@@ -92,9 +121,11 @@ class UNeXt(nn.Module):
         base_channels=32,
         depths=[1, 1, 1, 1],
         mlp_ratio=4,
-        drop_rate=0.1
+        drop_rate=0.1,
+        attention=False
     ):
         super().__init__()
+        self.attention = attention
         
         channels = [base_channels * (2 ** i) for i in range(len(depths))]
         self.stem = ConvBNReLU(in_channels, channels[0], kernel_size=3, stride=1, padding=1)
@@ -122,11 +153,16 @@ class UNeXt(nn.Module):
         )
         self.upsample_layers = nn.ModuleList()
         self.decoder_stages = nn.ModuleList()
+        self.attention_gates = nn.ModuleList()
         
         for i in range(len(depths) - 1, 0, -1):
             self.upsample_layers.append(
                 UpsampleBlock(channels[i], channels[i-1])
             )
+            if self.attention:
+                self.attention_gates.append(
+                    AttentionBlock(F_g=channels[i-1], F_l=channels[i-1], F_int=channels[i-1] // 2)
+                )
             self.decoder_stages.append(
                 nn.Sequential(
                     ConvBNReLU(channels[i-1] * 2, channels[i-1], kernel_size=1, padding=0),
@@ -167,6 +203,10 @@ class UNeXt(nn.Module):
         for i in range(len(self.upsample_layers)):
             x = self.upsample_layers[i](x)
             skip = skip_connections[-(i+1)]
+            
+            if self.attention:
+                skip = self.attention_gates[i](g=x, x=skip)
+            
             x = torch.cat([x, skip], dim=1)
             x = self.decoder_stages[i](x)
         
@@ -175,14 +215,15 @@ class UNeXt(nn.Module):
         return x
 
 
-def UNeXt_S(in_channels=1, num_classes=1, base_channels=32, depths=[1, 1, 1, 1], mlp_ratio=4, drop_rate=0.5):
+def UNeXt_S(in_channels=1, num_classes=1, base_channels=32, depths=[1, 1, 1, 1], mlp_ratio=4, drop_rate=0.5, attention=False):
     return UNeXt(
         in_channels=in_channels,
         num_classes=num_classes,
         base_channels=base_channels,
         depths=depths,
         mlp_ratio=mlp_ratio,
-        drop_rate=drop_rate
+        drop_rate=drop_rate,
+        attention=attention
     )
     
     

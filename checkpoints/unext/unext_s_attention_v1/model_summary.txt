@@ -1,6 +1,6 @@
-Experiment: unext_s_segmentation_v1
+Experiment: unext_s_attention_v1
 Model: UNeXt_S
-Total Trainable Parameters: 1,844,641
+Total Trainable Parameters: 1,866,938
 ------------------------------
 Model Config:
 {
@@ -16,7 +16,6 @@ Model Config:
         1
     ],
     "mlp_ratio": 4,
-    "drop_rate": 0.5
+    "drop_rate": 0.5,
+    "attention": true
 }
-
-Attention: not implemented

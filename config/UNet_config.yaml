@@ -1,18 +1,19 @@
-experiment_name: "unext_s_segmentation_v1"
+experiment_name: "unext_s_attention_v2"
 
 model:
   name: "UNeXt_S"
   in_channels: 1
   num_classes: 1
   input_size: 256
-  base_channels: 32
-  depths: [1, 1, 1, 1, 1]
-  mlp_ratio: 4
+  base_channels: 64
+  depths: [2, 1, 1, 1]
+  mlp_ratio:  4
   drop_rate: 0.5
+  attention: True
 
 data:
   dataset_json: "D:\\Collateral Coronary Vessels XAI\\data\\Segmentation Data\\dataset.json"
-  batch_size: 8
+  batch_size: 32
   num_workers: 4
 
 optimizer:

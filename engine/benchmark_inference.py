@@ -37,7 +37,8 @@ def benchmark():
         base_channels=config['model']['base_channels'],
         depths=config['model']['depths'],
         mlp_ratio=config['model']['mlp_ratio'],
-        drop_rate=0.0 # No dropout during inference
+        drop_rate=0.0, # No dropout during inference
+        attention=config['model'].get('attention', False)
     ).to(device)
     model.eval()
     

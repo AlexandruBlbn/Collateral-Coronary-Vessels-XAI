@@ -1,5 +1,5 @@
 {
-    "experiment_name": "unext_s_segmentation_v1",
+    "experiment_name": "unext_s_attention_v1",
     "model": {
         "name": "UNeXt_S",
         "in_channels": 1,
@@ -13,7 +13,8 @@
             1
         ],
         "mlp_ratio": 4,
-        "drop_rate": 0.5
+        "drop_rate": 0.5,
+        "attention": true
     },
     "data": {
         "dataset_json": "D:\\Collateral Coronary Vessels XAI\\data\\Segmentation Data\\dataset.json",
