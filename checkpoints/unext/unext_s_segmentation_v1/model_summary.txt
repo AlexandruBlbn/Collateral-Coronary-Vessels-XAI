@@ -1,0 +1,21 @@
+Experiment: unext_s_segmentation_v1
+Model: UNeXt_S
+Total Trainable Parameters: 7,277,729
+------------------------------
+Model Config:
+{
+    "name": "UNeXt_S",
+    "in_channels": 1,
+    "num_classes": 1,
+    "input_size": 256,
+    "base_channels": 32,
+    "depths": [
+        1,
+        1,
+        1,
+        1,
+        1
+    ],
+    "mlp_ratio": 4,
+    "drop_rate": 0.5
+}
