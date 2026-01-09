@@ -1,4 +1,4 @@
-experiment_name: "unext_s_attention_v2"
+experiment_name: "unext_s_attention_v3"
 
 model:
   name: "UNeXt_S"
@@ -6,20 +6,21 @@ model:
   num_classes: 1
   input_size: 256
   base_channels: 64
-  depths: [2, 1, 1, 1]
-  mlp_ratio:  4
+  depths: [2,2,2]
+  mlp_ratio: 2
   drop_rate: 0.5
   attention: True
 
 data:
   dataset_json: "D:\\Collateral Coronary Vessels XAI\\data\\Segmentation Data\\dataset.json"
-  batch_size: 32
-  num_workers: 4
+  batch_size: 4
+  num_workers: 2
 
 optimizer:
   lr: 1e-4
   weight_decay: 1e-4
   epochs: 100
+  warmup_epochs: 10
 
 system:
   device: "cuda"

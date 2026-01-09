@@ -12,6 +12,8 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 import importlib.util
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 # --- 1. SETUP PATHS & IMPORTS ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -91,21 +93,35 @@ def save_predictions_to_tensorboard(model, loader, writer, epoch, device, num_sa
         grid = torchvision.utils.make_grid(images_list, nrow=1, padding=2, normalize=False)
         writer.add_image('Val/Predictions', grid, epoch)
 
-class BCEDiceLoss(nn.Module):
-    def __init__(self):
+class DiceLoss(nn.Module):
+    def __init__(self, weight=None):
         super().__init__()
-        self.bce = nn.BCEWithLogitsLoss()
+        self.weight = weight
         
     def forward(self, inputs, targets):
-        bce_loss = self.bce(inputs, targets)
-        
+        inputs = inputs.float()
+        targets = targets.float()
         probs = torch.sigmoid(inputs)
-        intersection = (probs * targets).sum(dim=(2, 3))
-        union = probs.sum(dim=(2, 3)) + targets.sum(dim=(2, 3))
+        
+        w = 1.0
+        if self.weight is not None:
+            w = targets * (self.weight - 1) + 1
+            
+        intersection = (w * probs * targets).sum(dim=(2, 3))
+        union = (w * probs).sum(dim=(2, 3)) + (w * targets).sum(dim=(2, 3))
         dice_score = (2. * intersection + 1e-6) / (union + 1e-6)
         dice_loss = 1 - dice_score.mean()
         
-        return 0.5 * bce_loss + dice_loss
+        return dice_loss
+
+def get_warmup_augmentation(input_size):
+    return A.Compose([
+        A.Resize(input_size, input_size),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.Normalize(mean=(0.5,), std=(0.5,), max_pixel_value=255.0),
+        ToTensorV2()
+    ])
 
 # --- 4. TRAINING LOOP ---
 def train():
@@ -123,6 +139,9 @@ def train():
     print(f"--> Training {run_name} on {device}")
     print(f"--> Logs: {log_dir}")
     print(f"--> Checkpoints: {save_dir}")
+    
+    # Enable cuDNN benchmark for optimized kernel selection
+    torch.backends.cudnn.benchmark = True
 
     # Save config
     with open(os.path.join(save_dir, 'config.json'), 'w') as f:
@@ -145,10 +164,16 @@ def train():
     
     print(f"--> Dataset Split: {len(train_keys)} Train | {len(val_keys)} Validation")
 
+    warmup_epochs = config['optimizer'].get('warmup_epochs', 0)
+    initial_transform = get_training_augmentation()
+    if warmup_epochs > 0:
+        print(f"--> Progressive Learning: Warmup enabled for first {warmup_epochs} epochs.")
+        initial_transform = get_warmup_augmentation(config['model']['input_size'])
+
     train_dataset = SegmentationDataset(
         json_path=config['data']['dataset_json'],
         keys=train_keys,
-        transform=get_training_augmentation()
+        transform=initial_transform
     )
     val_dataset = SegmentationDataset(
         json_path=config['data']['dataset_json'],
@@ -198,12 +223,13 @@ def train():
         f.write(f"Model Config:\n{json.dumps(config['model'], indent=4)}\n")
 
     # Optimization
-    criterion = BCEDiceLoss()
+    criterion = DiceLoss(weight=1.5)
     optimizer = optim.AdamW(
         model.parameters(),
         lr=float(config['optimizer']['lr']),
         weight_decay=float(config['optimizer']['weight_decay'])
     )
+    scaler = torch.amp.GradScaler('cuda')
     
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['optimizer']['epochs'], eta_min=1e-5)
     
@@ -212,6 +238,11 @@ def train():
     best_mean_dice = 0.0
     
     for epoch in range(epochs):
+        # Progressive Augmentation Switch
+        if warmup_epochs > 0 and epoch == warmup_epochs:
+            print(f"--> Warmup complete (Epoch {epoch}). Switching to Full Augmentation.")
+            train_dataset.transform = get_training_augmentation()
+        
         model.train()
         epoch_loss = 0
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{epochs}]")
@@ -221,10 +252,14 @@ def train():
             masks = batch['mask'].to(device)
             
             optimizer.zero_grad()
-            outputs = model(imgs)
-            loss = criterion(outputs, masks)
-            loss.backward()
-            optimizer.step()
+            
+            with torch.amp.autocast('cuda'):
+                outputs = model(imgs)
+                loss = criterion(outputs, masks)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             epoch_loss += loss.item()
             loop.set_postfix(loss=loss.item())
@@ -247,8 +282,9 @@ def train():
                 imgs = batch['image'].to(device)
                 masks = batch['mask'].to(device)
                 
-                outputs = model(imgs)
-                loss = criterion(outputs, masks)
+                with torch.amp.autocast('cuda'):
+                    outputs = model(imgs)
+                    loss = criterion(outputs, masks)
                 val_loss += loss.item()
                 
                 # Metrics

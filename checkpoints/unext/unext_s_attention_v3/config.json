@@ -1,0 +1,34 @@
+{
+    "experiment_name": "unext_s_attention_v3",
+    "model": {
+        "name": "UNeXt_S",
+        "in_channels": 1,
+        "num_classes": 1,
+        "input_size": 256,
+        "base_channels": 64,
+        "depths": [
+            2,
+            2,
+            2
+        ],
+        "mlp_ratio": 2,
+        "drop_rate": 0.5,
+        "attention": true
+    },
+    "data": {
+        "dataset_json": "D:\\Collateral Coronary Vessels XAI\\data\\Segmentation Data\\dataset.json",
+        "batch_size": 4,
+        "num_workers": 2
+    },
+    "optimizer": {
+        "lr": "1e-4",
+        "weight_decay": "1e-4",
+        "epochs": 100,
+        "warmup_epochs": 10
+    },
+    "system": {
+        "device": "cuda",
+        "seed": 42,
+        "save_dir": "./checkpoints/unext/"
+    }
+}

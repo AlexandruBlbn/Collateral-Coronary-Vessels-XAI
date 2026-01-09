@@ -8,7 +8,7 @@ class ConvBNReLU(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
-            nn.BatchNorm2d(out_channels),
+            nn.GroupNorm(8, out_channels),
             nn.ReLU(inplace=True)
         )
     
@@ -27,8 +27,8 @@ class TokenizedMLP(nn.Module):
         self.act = nn.GELU()
         self.fc2 = nn.Conv2d(hidden_channels, out_channels, 1)
         self.drop = nn.Dropout(drop)
-        self.norm1 = nn.BatchNorm2d(in_channels)
-        self.norm2 = nn.BatchNorm2d(hidden_channels)
+        self.norm1 = nn.GroupNorm(8, in_channels)
+        self.norm2 = nn.GroupNorm(8, hidden_channels)
     
     def forward(self, x):
         identity = x
@@ -43,11 +43,32 @@ class TokenizedMLP(nn.Module):
         return x + identity
 
 
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, drop=0.):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, in_channels, 3, 1, 1, bias=False)
+        self.norm1 = nn.GroupNorm(8, in_channels)
+        self.act = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(in_channels, in_channels, 3, 1, 1, bias=False)
+        self.norm2 = nn.GroupNorm(8, in_channels)
+        self.drop = nn.Dropout(drop)
+        
+    def forward(self, x):
+        identity = x
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.conv2(x)
+        x = self.norm2(x)
+        return self.act(x + identity)
+
+
 class DownsampleBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, 2, 2)
-        self.norm = nn.BatchNorm2d(out_channels)
+        self.norm = nn.GroupNorm(8, out_channels)
     
     def forward(self, x):
         x = self.conv(x)
@@ -59,7 +80,7 @@ class UpsampleBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.up = nn.ConvTranspose2d(in_channels, out_channels, 2, 2)
-        self.norm = nn.BatchNorm2d(out_channels)
+        self.norm = nn.GroupNorm(8, out_channels)
     
     def forward(self, x):
         x = self.up(x)
@@ -68,15 +89,20 @@ class UpsampleBlock(nn.Module):
 
 
 class StageBlock(nn.Module):
-    def __init__(self, in_channels, num_blocks=2, mlp_ratio=4, drop=0.):
+    def __init__(self, in_channels, num_blocks=2, mlp_ratio=4, drop=0., block_type='mlp'):
         super().__init__()
-        self.blocks = nn.ModuleList([
-            TokenizedMLP(
-                in_channels=in_channels,
-                hidden_channels=int(in_channels * mlp_ratio),
-                drop=drop
-            ) for _ in range(num_blocks)
-        ])
+        if block_type == 'mlp':
+            self.blocks = nn.ModuleList([
+                TokenizedMLP(
+                    in_channels=in_channels,
+                    hidden_channels=int(in_channels * mlp_ratio),
+                    drop=drop
+                ) for _ in range(num_blocks)
+            ])
+        else:
+            self.blocks = nn.ModuleList([
+                ResBlock(in_channels, drop=drop) for _ in range(num_blocks)
+            ])
     
     def forward(self, x):
         for block in self.blocks:
@@ -89,17 +115,17 @@ class AttentionBlock(nn.Module):
         super().__init__()
         self.W_g = nn.Sequential(
             nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
+            nn.GroupNorm(8, F_int)
         )
         
         self.W_x = nn.Sequential(
             nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(F_int)
+            nn.GroupNorm(8, F_int)
         )
 
         self.psi = nn.Sequential(
             nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(1),
+            nn.GroupNorm(1, 1),
             nn.Sigmoid()
         )
         
@@ -136,20 +162,21 @@ class UNeXt(nn.Module):
         
         # Stage 1
         self.encoder_stages.append(
-            StageBlock(channels[0], num_blocks=depths[0], mlp_ratio=mlp_ratio, drop=drop_rate)
+            StageBlock(channels[0], num_blocks=depths[0], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='conv')
         )
         for i in range(1, len(depths)):
             self.downsample_layers.append(
                 DownsampleBlock(channels[i-1], channels[i])
             )
             self.encoder_stages.append(
-                StageBlock(channels[i], num_blocks=depths[i], mlp_ratio=mlp_ratio, drop=drop_rate)
+                StageBlock(channels[i], num_blocks=depths[i], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='mlp')
             )
         self.bottleneck = StageBlock(
             channels[-1], 
             num_blocks=depths[-1], 
             mlp_ratio=mlp_ratio, 
-            drop=drop_rate
+            drop=drop_rate,
+            block_type='mlp'
         )
         self.upsample_layers = nn.ModuleList()
         self.decoder_stages = nn.ModuleList()
@@ -166,7 +193,7 @@ class UNeXt(nn.Module):
             self.decoder_stages.append(
                 nn.Sequential(
                     ConvBNReLU(channels[i-1] * 2, channels[i-1], kernel_size=1, padding=0),
-                    StageBlock(channels[i-1], num_blocks=depths[i-1], mlp_ratio=mlp_ratio, drop=drop_rate)
+                    StageBlock(channels[i-1], num_blocks=depths[i-1], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='conv' if (i-1)==0 else 'mlp')
                 )
             )
         self.head = nn.Sequential(
@@ -182,7 +209,7 @@ class UNeXt(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
     
@@ -215,7 +242,7 @@ class UNeXt(nn.Module):
         return x
 
 
-def UNeXt_S(in_channels=1, num_classes=1, base_channels=32, depths=[1, 1, 1, 1], mlp_ratio=4, drop_rate=0.5, attention=False):
+def UNeXt_S(in_channels=1, num_classes=1, base_channels=64, depths=[3,1,1], mlp_ratio=4, drop_rate=0.5, attention=True):
     return UNeXt(
         in_channels=in_channels,
         num_classes=num_classes,
@@ -229,4 +256,4 @@ def UNeXt_S(in_channels=1, num_classes=1, base_channels=32, depths=[1, 1, 1, 1],
     
 if __name__ == "__main__":
     model = UNeXt_S(in_channels=1, num_classes=1)
-    summary(model, input_size=(1, 1, 256, 256))
+    summary(model, input_size=(16, 1, 256,256))
