@@ -114,6 +114,15 @@ class DiceLoss(nn.Module):
         
         return dice_loss
 
+class BCEDiceLoss(nn.Module):
+    def __init__(self, weight=None):
+        super().__init__()
+        self.dice = DiceLoss(weight=weight)
+        self.bce = nn.BCEWithLogitsLoss()
+        
+    def forward(self, inputs, targets):
+        return 0.5 * self.bce(inputs, targets.float()) + self.dice(inputs, targets)
+
 def get_warmup_augmentation(input_size):
     return A.Compose([
         A.Resize(input_size, input_size),
@@ -191,7 +200,8 @@ def train():
         batch_size=batch_size,
         shuffle=True,
         num_workers=config['data']['num_workers'],
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True
     )
     val_loader = DataLoader(
         val_dataset,
@@ -223,7 +233,7 @@ def train():
         f.write(f"Model Config:\n{json.dumps(config['model'], indent=4)}\n")
 
     # Optimization
-    criterion = DiceLoss(weight=1.5)
+    criterion = BCEDiceLoss(weight=1.5)
     optimizer = optim.AdamW(
         model.parameters(),
         lr=float(config['optimizer']['lr']),

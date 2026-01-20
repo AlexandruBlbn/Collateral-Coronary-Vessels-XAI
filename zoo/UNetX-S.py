@@ -8,8 +8,8 @@ class ConvBNReLU(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
-            nn.GroupNorm(8, out_channels),
-            nn.ReLU(inplace=True)
+            nn.BatchNorm2d(out_channels),
+            nn.SiLU(inplace=True)
         )
     
     def forward(self, x):
@@ -27,8 +27,8 @@ class TokenizedMLP(nn.Module):
         self.act = nn.GELU()
         self.fc2 = nn.Conv2d(hidden_channels, out_channels, 1)
         self.drop = nn.Dropout(drop)
-        self.norm1 = nn.GroupNorm(8, in_channels)
-        self.norm2 = nn.GroupNorm(8, hidden_channels)
+        self.norm1 = nn.BatchNorm2d(in_channels)
+        self.norm2 = nn.BatchNorm2d(hidden_channels)
     
     def forward(self, x):
         identity = x
@@ -47,10 +47,10 @@ class ResBlock(nn.Module):
     def __init__(self, in_channels, drop=0.):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, in_channels, 3, 1, 1, bias=False)
-        self.norm1 = nn.GroupNorm(8, in_channels)
+        self.norm1 = nn.BatchNorm2d(in_channels)
         self.act = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(in_channels, in_channels, 3, 1, 1, bias=False)
-        self.norm2 = nn.GroupNorm(8, in_channels)
+        self.norm2 = nn.BatchNorm2d(in_channels)
         self.drop = nn.Dropout(drop)
         
     def forward(self, x):
@@ -68,7 +68,7 @@ class DownsampleBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, 2, 2)
-        self.norm = nn.GroupNorm(8, out_channels)
+        self.norm = nn.BatchNorm2d(out_channels)
     
     def forward(self, x):
         x = self.conv(x)
@@ -79,11 +79,13 @@ class DownsampleBlock(nn.Module):
 class UpsampleBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.up = nn.ConvTranspose2d(in_channels, out_channels, 2, 2)
-        self.norm = nn.GroupNorm(8, out_channels)
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.conv = nn.Conv2d(in_channels, out_channels, 1, 1, 0, bias=False)
+        self.norm = nn.BatchNorm2d(out_channels)
     
     def forward(self, x):
         x = self.up(x)
+        x = self.conv(x)
         x = self.norm(x)
         return x
 
@@ -115,17 +117,17 @@ class AttentionBlock(nn.Module):
         super().__init__()
         self.W_g = nn.Sequential(
             nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.GroupNorm(8, F_int)
+            nn.BatchNorm2d(F_int)
         )
         
         self.W_x = nn.Sequential(
             nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.GroupNorm(8, F_int)
+            nn.BatchNorm2d(F_int)
         )
 
         self.psi = nn.Sequential(
             nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.GroupNorm(1, 1),
+            nn.BatchNorm2d(1),
             nn.Sigmoid()
         )
         
@@ -229,7 +231,7 @@ class UNeXt(nn.Module):
         
         for i in range(len(self.upsample_layers)):
             x = self.upsample_layers[i](x)
-            skip = skip_connections[-(i+1)]
+            skip = skip_connections[i-1]
             
             if self.attention:
                 skip = self.attention_gates[i](g=x, x=skip)
@@ -242,7 +244,7 @@ class UNeXt(nn.Module):
         return x
 
 
-def UNeXt_S(in_channels=1, num_classes=1, base_channels=64, depths=[3,1,1], mlp_ratio=4, drop_rate=0.5, attention=True):
+def UNeXt_S(in_channels=1, num_classes=1, base_channels=64, depths=[2,2,2], mlp_ratio=4, drop_rate=0.1, attention=True):
     return UNeXt(
         in_channels=in_channels,
         num_classes=num_classes,
@@ -256,4 +258,4 @@ def UNeXt_S(in_channels=1, num_classes=1, base_channels=64, depths=[3,1,1], mlp_
     
 if __name__ == "__main__":
     model = UNeXt_S(in_channels=1, num_classes=1)
-    summary(model, input_size=(16, 1, 256,256))
+    summary(model, input_size=(16, 1, 128,128))
