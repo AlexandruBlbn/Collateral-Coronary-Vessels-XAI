@@ -110,19 +110,20 @@ def get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, pr
     return model
 
 
-def sanityCheck():
-    vit_model = get_backbone(model_name='vit_small_patch16_224', in_channels=1, pretrained=False, print_summary=True)
-    # swin_model = get_backbone(model_name='swinv2_tiny_window16_256', in_channels=1, pretrained=False, summary=False)
-    # convnext_model = get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, summary=False)
+if __name__ == "__main__":
+    # --- Memory Estimation Tool ---
+    # Adjust these values to test different configurations
+    BATCH_SIZE = 64
+    IMG_SIZE = 256
+    IN_CHANNELS = 1
+    MODEL_NAME = 'swinv2_tiny_window16_256' # Options: convnext_tiny, swinv2_tiny_window16_256, vit_small_patch16_224
     
-    x = torch.randn((1, 1, 256, 256))
+    print(f"--> Estimating Memory for: {MODEL_NAME}")
+    print(f"--> Configuration: Batch={BATCH_SIZE}, Size={IMG_SIZE}x{IMG_SIZE}, Channels={IN_CHANNELS}")
+    print("--> NOTE: For FP16 (Mixed Precision), activation memory is roughly ~50% of the reported Forward/Backward pass size.")
     
-    # vit_out = vit_model(x)
-    # swin_out = swin_model(x)
-    # convnext_out = convnext_model(x)
-    
-    # print(f'ViT output shape: {vit_out.shape}') #1 384 16 16
-    # print(f'Swin output shape: {swin_out.shape}') #1 768 8 8
-    # print(f'ConvNeXT output shape: {convnext_out.shape}') #1 768 8 8
-    
-# sanityCheck()
+    model = get_backbone(model_name=MODEL_NAME, in_channels=IN_CHANNELS)
+    summary(model, 
+            input_size=(BATCH_SIZE, IN_CHANNELS, IMG_SIZE, IMG_SIZE),
+            col_names=["input_size", "output_size", "num_params", "mult_adds"],
+            verbose=1)

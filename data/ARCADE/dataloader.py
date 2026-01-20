@@ -245,22 +245,30 @@ class ARCADEDataset(Dataset):
                 if 'segmentare' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['segmentare'].items():
                         self.samples.append((pacienti['data'], None))
+                if 'syntax' in self.data[split]:
+                    for patient_id, pacienti in self.data[split]['syntax'].items():
+                        self.samples.append((pacienti['data'], None))
+                
+                if 'extra' in self.data and 'pretrain' in self.data['extra']:
+                    for _, item in self.data['extra']['pretrain'].items():
+                        self.samples.append((item['data'], None))
 
     def __len__(self):
             return len(self.samples)
         
     def __getitem__(self, idx):
             samples = self.samples[idx]
-            image_path = os.path.join("data/ARCADE/", samples[0])  
-            image = Image.open(image_path).convert('L')
-            image = image.resize((256, 256), Image.LANCZOS)
-            image = np.array(image, dtype=np.float32)
-            image = image / 255.0
+            image_path = os.path.join("data/ARCADE/", samples[0])
+            # OpenCV este mult mai rapid decat PIL pentru citire si resize
+            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if image is None: raise FileNotFoundError(image_path)
+            image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_LINEAR)
+            image = image.astype(np.float32) / 255.0
             
             if self.task == 'SegStenoza':
                 label_path = os.path.join("data/ARCADE/", samples[1])
-                label = Image.open(label_path).convert('L')
-                label = label.resize((256, 256), Image.NEAREST)
+                label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
+                label = cv2.resize(label, (256, 256), interpolation=cv2.INTER_NEAREST)
                 label = np.array(label, dtype=np.float32)
                 label = label / 255.0
                 label = (label > 0.5).astype(np.float32)

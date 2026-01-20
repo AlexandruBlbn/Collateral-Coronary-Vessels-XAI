@@ -64,13 +64,16 @@ def get_mim_dataloader(json_path, batch_size=32):
         mask_generator=mask_gen
     )
 
+    num_workers = config['data'].get('num_workers', 0)
     loader = DataLoader(
         mim_dataset, 
         batch_size=batch_size, 
         shuffle=True, 
-        num_workers=config['data'].get('num_workers', 0), 
+        num_workers=num_workers, 
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=2 if num_workers > 0 else None
     )
     
     return loader
@@ -144,6 +147,10 @@ def train():
     device = setupSystem()
     print(f"--> Training on Device: {device}")
     
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    
 
     run_name = f"{config['experiment_name']}"
     log_dir = os.path.join(project_root, 'runs', run_name)
@@ -159,6 +166,7 @@ def train():
     os.makedirs(save_dir, exist_ok=True)
     
     train_loader = get_mim_dataloader(json_path, batch_size=config['data']['batch_size'])
+    print(f"--> Total Pretraining Images: {len(train_loader.dataset)}")
     print(f"--> Initializing SimMIM Backbone: {config['model']['backbone']}")
     
     encoder_stride = 32
@@ -178,6 +186,7 @@ def train():
         lr=start_lr,
         weight_decay=float(config['optimizer']['weight_decay'])
     )
+    scaler = torch.amp.GradScaler('cuda', enabled=True)
     
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, 
@@ -200,9 +209,12 @@ def train():
             masks = masks.to(device)
             optimizer.zero_grad()
 
-            loss, rec_imgs = model(imgs, masks)
-            loss.backward()
-            optimizer.step()
+            with torch.amp.autocast('cuda'):
+                loss, rec_imgs = model(imgs, masks)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             running_loss += loss.item()
             loop.set_postfix(loss=loss.item())
@@ -231,9 +243,10 @@ def train():
             best_full_path = os.path.join(save_dir, f"{config['experiment_name']}_full_best.pth")
             torch.save(full_state, best_full_path)
 
-        tb_grid = save_plotting_samples(model, train_loader, epoch, log_dir, device, num_samples=40)
-        if tb_grid is not None:
-            writer.add_image('Reconstruction_Samples_Grid', tb_grid, global_step=epoch)
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            tb_grid = save_plotting_samples(model, train_loader, epoch, log_dir, device, num_samples=20)
+            if tb_grid is not None:
+                writer.add_image('Reconstruction_Samples_Grid', tb_grid, global_step=epoch)
 
     flat_config = flatten_config(config)
     writer.add_hparams(flat_config, {'hparam/loss': best_loss})
