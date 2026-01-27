@@ -1,13 +1,13 @@
-experiment_name: "unext_s_attention_prototype"
+experiment_name: "unext_test2"
 
 model:
   name: "UNeXt_S"
   in_channels: 1
   num_classes: 1
-  input_size: 128
+  input_size: 256
   base_channels: 64
-  depths: [2,2,2]
-  mlp_ratio: 4
+  depths: [3,3,3]
+  mlp_ratio: 2
   drop_rate: 0.3
   attention: True
 

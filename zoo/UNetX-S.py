@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint as checkpoint
 from torchinfo import summary
 
 
@@ -48,7 +49,7 @@ class ResBlock(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, in_channels, 3, 1, 1, bias=False)
         self.norm1 = nn.BatchNorm2d(in_channels)
-        self.act = nn.ReLU(inplace=True)
+        self.act = nn.SiLU(inplace=True)
         self.conv2 = nn.Conv2d(in_channels, in_channels, 3, 1, 1, bias=False)
         self.norm2 = nn.BatchNorm2d(in_channels)
         self.drop = nn.Dropout(drop)
@@ -91,8 +92,9 @@ class UpsampleBlock(nn.Module):
 
 
 class StageBlock(nn.Module):
-    def __init__(self, in_channels, num_blocks=2, mlp_ratio=4, drop=0., block_type='mlp'):
+    def __init__(self, in_channels, num_blocks=2, mlp_ratio=4, drop=0., block_type='mlp', use_checkpoint=False):
         super().__init__()
+        self.use_checkpoint = use_checkpoint
         if block_type == 'mlp':
             self.blocks = nn.ModuleList([
                 TokenizedMLP(
@@ -107,8 +109,12 @@ class StageBlock(nn.Module):
             ])
     
     def forward(self, x):
-        for block in self.blocks:
-            x = block(x)
+        if self.use_checkpoint and x.requires_grad:
+            for block in self.blocks:
+                x = checkpoint.checkpoint(block, x, use_reentrant=False)
+        else:
+            for block in self.blocks:
+                x = block(x)
         return x
 
 
@@ -131,7 +137,7 @@ class AttentionBlock(nn.Module):
             nn.Sigmoid()
         )
         
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.SiLU(inplace=True)
         
     def forward(self, g, x):
         g1 = self.W_g(g)
@@ -150,10 +156,12 @@ class UNeXt(nn.Module):
         depths=[1, 1, 1, 1],
         mlp_ratio=4,
         drop_rate=0.1,
-        attention=False
+        attention=False,
+        use_checkpoint=False
     ):
         super().__init__()
         self.attention = attention
+        self.use_checkpoint = use_checkpoint
         
         channels = [base_channels * (2 ** i) for i in range(len(depths))]
         self.stem = ConvBNReLU(in_channels, channels[0], kernel_size=3, stride=1, padding=1)
@@ -164,21 +172,22 @@ class UNeXt(nn.Module):
         
         # Stage 1
         self.encoder_stages.append(
-            StageBlock(channels[0], num_blocks=depths[0], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='conv')
+            StageBlock(channels[0], num_blocks=depths[0], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='conv', use_checkpoint=use_checkpoint)
         )
         for i in range(1, len(depths)):
             self.downsample_layers.append(
                 DownsampleBlock(channels[i-1], channels[i])
             )
             self.encoder_stages.append(
-                StageBlock(channels[i], num_blocks=depths[i], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='mlp')
+                StageBlock(channels[i], num_blocks=depths[i], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='mlp', use_checkpoint=use_checkpoint)
             )
         self.bottleneck = StageBlock(
             channels[-1], 
             num_blocks=depths[-1], 
             mlp_ratio=mlp_ratio, 
             drop=drop_rate,
-            block_type='mlp'
+            block_type='mlp',
+            use_checkpoint=use_checkpoint
         )
         self.upsample_layers = nn.ModuleList()
         self.decoder_stages = nn.ModuleList()
@@ -195,7 +204,7 @@ class UNeXt(nn.Module):
             self.decoder_stages.append(
                 nn.Sequential(
                     ConvBNReLU(channels[i-1] * 2, channels[i-1], kernel_size=1, padding=0),
-                    StageBlock(channels[i-1], num_blocks=depths[i-1], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='conv' if (i-1)==0 else 'mlp')
+                    StageBlock(channels[i-1], num_blocks=depths[i-1], mlp_ratio=mlp_ratio, drop=drop_rate, block_type='conv' if (i-1)==0 else 'mlp', use_checkpoint=use_checkpoint)
                 )
             )
         self.head = nn.Sequential(
@@ -227,11 +236,12 @@ class UNeXt(nn.Module):
             skip_connections.append(x)
         x = self.bottleneck(x)
         
-        skip_connections = skip_connections[:-1]
+        # Remove the last skip connection as it's the input to the bottleneck
+        skip_connections.pop()
         
         for i in range(len(self.upsample_layers)):
             x = self.upsample_layers[i](x)
-            skip = skip_connections[i-1]
+            skip = skip_connections.pop()
             
             if self.attention:
                 skip = self.attention_gates[i](g=x, x=skip)
@@ -244,7 +254,7 @@ class UNeXt(nn.Module):
         return x
 
 
-def UNeXt_S(in_channels=1, num_classes=1, base_channels=64, depths=[2,2,2], mlp_ratio=4, drop_rate=0.1, attention=True):
+def UNeXt_S(in_channels=1, num_classes=1, base_channels=32, depths=[3,3,3], mlp_ratio=4, drop_rate=0.2, attention=True, use_checkpoint=False):
     return UNeXt(
         in_channels=in_channels,
         num_classes=num_classes,
@@ -252,10 +262,11 @@ def UNeXt_S(in_channels=1, num_classes=1, base_channels=64, depths=[2,2,2], mlp_
         depths=depths,
         mlp_ratio=mlp_ratio,
         drop_rate=drop_rate,
-        attention=attention
+        attention=attention,
+        use_checkpoint=use_checkpoint
     )
     
     
 if __name__ == "__main__":
     model = UNeXt_S(in_channels=1, num_classes=1)
-    summary(model, input_size=(16, 1, 128,128))
+    summary(model, input_size=(8, 1, 256, 256))

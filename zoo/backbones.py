@@ -113,15 +113,11 @@ def get_backbone(model_name='convnext_tiny', in_channels=1, pretrained=False, pr
 if __name__ == "__main__":
     # --- Memory Estimation Tool ---
     # Adjust these values to test different configurations
-    BATCH_SIZE = 64
+    BATCH_SIZE = 32
     IMG_SIZE = 256
     IN_CHANNELS = 1
-    MODEL_NAME = 'swinv2_tiny_window16_256' # Options: convnext_tiny, swinv2_tiny_window16_256, vit_small_patch16_224
-    
-    print(f"--> Estimating Memory for: {MODEL_NAME}")
-    print(f"--> Configuration: Batch={BATCH_SIZE}, Size={IMG_SIZE}x{IMG_SIZE}, Channels={IN_CHANNELS}")
-    print("--> NOTE: For FP16 (Mixed Precision), activation memory is roughly ~50% of the reported Forward/Backward pass size.")
-    
+    MODEL_NAME = 'vit_small_patch16_224' # Options: convnext_tiny, swinv2_tiny_window16_256, vit_small_patch16_224
+
     model = get_backbone(model_name=MODEL_NAME, in_channels=IN_CHANNELS)
     summary(model, 
             input_size=(BATCH_SIZE, IN_CHANNELS, IMG_SIZE, IMG_SIZE),
