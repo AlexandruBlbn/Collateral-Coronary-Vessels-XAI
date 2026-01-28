@@ -383,12 +383,11 @@ class DINOv3(nn.Module):
         # Gram anchoring
         gram_loss = torch.tensor(0.0, device=crops[0].device)
         if self.use_gram_anchoring:
-            # Get intermediate features from student (before projection)
+            # Get intermediate features
             with torch.no_grad():
-                # Only use global crops for Gram computation
                 global_crops = torch.cat(crops[:2], dim=0)
                 features = self.student.get_intermediate_features(global_crops)
-                features = F.normalize(features, dim=-1, p=2)
+                # features = F.normalize(features, dim=-1, p=2) # <-- COMENTEAZA LINIA ASTA
                 
                 if update_gram:
                     self.gram_anchor.update_anchor(features)
@@ -396,7 +395,8 @@ class DINOv3(nn.Module):
             # Compute Gram loss (with gradients)
             global_crops_grad = torch.cat(crops[:2], dim=0)
             features_grad = self.student.get_intermediate_features(global_crops_grad)
-            features_grad = F.normalize(features_grad, dim=-1, p=2)
+            # features_grad = F.normalize(features_grad, dim=-1, p=2) # <-- COMENTEAZA SI ASTA
+            
             gram_loss = self.gram_anchor.compute_gram_loss(features_grad)
         
         return student_output, teacher_output, gram_loss

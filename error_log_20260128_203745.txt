@@ -1,0 +1,78 @@
+Error occurred at: 2026-01-28 20:37:45.417017
+================================================================================
+
+Exception Type: OutOfMemoryError
+Exception Message: CUDA out of memory. Tried to allocate 768.00 MiB. GPU 0 has a total capacity of 15.48 GiB of which 11.00 MiB is free. Including non-PyTorch memory, this process has 15.46 GiB memory in use. Of the allocated memory 14.73 GiB is allocated by PyTorch, and 417.09 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+
+Full Traceback:
+================================================================================
+Traceback (most recent call last):
+  File "/root/Collateral-Coronary-Vessels-XAI/engine/dino_trained.py", line 558, in <module>
+    train()
+  File "/root/Collateral-Coronary-Vessels-XAI/engine/dino_trained.py", line 392, in train
+    student_output, teacher_output, gram_loss = model(crops, update_gram=update_gram)
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/Collateral-Coronary-Vessels-XAI/zoo/dino.py", line 397, in forward
+    features_grad = self.student.get_intermediate_features(global_crops_grad)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/Collateral-Coronary-Vessels-XAI/zoo/dino.py", line 175, in get_intermediate_features
+    features = self.backbone(x)
+               ^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/Collateral-Coronary-Vessels-XAI/zoo/backbones.py", line 28, in forward
+    x = self.model.forward_features(x) #b, n_tokene, dim
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/timm/models/swin_transformer_v2.py", line 1044, in forward_features
+    x = self.layers(x)
+        ^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/container.py", line 253, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/timm/models/swin_transformer_v2.py", line 707, in forward
+    x = blk(x)
+        ^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/timm/models/swin_transformer_v2.py", line 527, in forward
+    x = x + self.drop_path1(self.norm1(self._attn(x)))
+                                       ^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/timm/models/swin_transformer_v2.py", line 511, in _attn
+    attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/site-packages/timm/models/swin_transformer_v2.py", line 266, in forward
+    attn = attn * logit_scale
+           ~~~~~^~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 768.00 MiB. GPU 0 has a total capacity of 15.48 GiB of which 11.00 MiB is free. Including non-PyTorch memory, this process has 15.46 GiB memory in use. Of the allocated memory 14.73 GiB is allocated by PyTorch, and 417.09 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

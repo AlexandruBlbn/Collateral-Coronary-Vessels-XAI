@@ -7,14 +7,14 @@ model:
   embed_dim: 384 
   
   # DINOv3 Head
-  projection_dim: 8192  
+  projection_dim: 512 
   hidden_dim: 2048
   bottleneck_dim: 256
-  num_prototypes: 8192
+  num_prototypes: 512
 
   gram_anchoring:
     enabled: true
-    lambda_gram: 0.9  # Weight for gram loss
+    lambda_gram: 0.01  # Weight for gram loss
     update_freq: 10   # Update anchor every N steps
     momentum: 0.99    # EMA momentum for anchor update
 
@@ -29,7 +29,7 @@ data:
   num_local_crops: 4  
 
 optimizer:
-  lr: 5e-4
+  lr: 1.0e-4
   min_lr: 1e-6
   weight_decay: 0.04
   weight_decay_end: 0.4
@@ -37,7 +37,7 @@ optimizer:
   warmup_epochs: 10
   
 
-  gradient_accumulation_steps: 1  # Effective batch = 16 * 1 = 16
+  gradient_accumulation_steps: 4  # Effective batch = 16 * 1 = 16
 
 teacher:
   momentum_start: 0.996
