@@ -467,7 +467,8 @@ def train():
         writer.add_scalar('Learning_Rate', current_lr, epoch)
         writer.add_scalar('Teacher_Momentum', momentum_schedule[min(epoch * niter_per_ep, len(momentum_schedule) - 1)], epoch)
         
-        print(f"Epoch {epoch+1} | Loss: {avg_loss:.5f} | DINO: {avg_dino_loss:.5f} | Gram: {avg_gram_loss:.8f} | LR: {current_lr:.2e}")
+        weighted_gram = avg_gram_loss * lambda_gram if config['model']['gram_anchoring']['enabled'] else 0.0
+        print(f"Epoch {epoch+1} | Loss: {avg_loss:.5f} | DINO: {avg_dino_loss:.5f} | Gram(W): {weighted_gram:.4f} | Gram(Raw): {avg_gram_loss:.2e} | LR: {current_lr:.2e}")
         
         # Save best model (student backbone only)
         if avg_loss < best_loss:
