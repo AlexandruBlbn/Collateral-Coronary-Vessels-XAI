@@ -387,7 +387,7 @@ class DINOv3(nn.Module):
             with torch.no_grad():
                 global_crops = torch.cat(crops[:2], dim=0)
                 features = self.student.get_intermediate_features(global_crops)
-                # features = F.normalize(features, dim=-1, p=2) # <-- COMENTEAZA LINIA ASTA
+                #features = F.normalize(features, dim=-1, p=2) # <-- COMENTEAZA LINIA ASTA
                 
                 if update_gram:
                     self.gram_anchor.update_anchor(features)
@@ -395,7 +395,7 @@ class DINOv3(nn.Module):
             # Compute Gram loss (with gradients)
             global_crops_grad = torch.cat(crops[:2], dim=0)
             features_grad = self.student.get_intermediate_features(global_crops_grad)
-            # features_grad = F.normalize(features_grad, dim=-1, p=2) # <-- COMENTEAZA SI ASTA
+            #features_grad = F.normalize(features_grad, dim=-1, p=2) # <-- COMENTEAZA SI ASTA
             
             gram_loss = self.gram_anchor.compute_gram_loss(features_grad)
         

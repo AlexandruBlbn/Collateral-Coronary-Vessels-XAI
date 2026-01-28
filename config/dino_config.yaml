@@ -14,7 +14,7 @@ model:
 
   gram_anchoring:
     enabled: true
-    lambda_gram: 0.01  # Weight for gram loss
+    lambda_gram: 0.5  # Weight for gram loss
     update_freq: 10   # Update anchor every N steps
     momentum: 0.99    # EMA momentum for anchor update
 
@@ -43,7 +43,7 @@ teacher:
   momentum_start: 0.996
   momentum_end: 0.9995
   warmup_teacher_temp: 0.04
-  teacher_temp: 0.07
+  teacher_temp: 0.05
   warmup_teacher_temp_epochs: 30
 
 student:
