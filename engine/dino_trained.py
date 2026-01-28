@@ -448,7 +448,7 @@ def train():
             loop.set_postfix({
                 'loss': f"{loss.item() * accum_steps:.4f}",
                 'dino': f"{loss_dino.item():.4f}",
-                'gram': f"{gram_loss.item():.4f}" if config['model']['gram_anchoring']['enabled'] else "N/A"
+                'gram': f"{gram_loss.item():.8f}" if config['model']['gram_anchoring']['enabled'] else "N/A"
             })
         
         # Epoch statistics
@@ -467,7 +467,7 @@ def train():
         writer.add_scalar('Learning_Rate', current_lr, epoch)
         writer.add_scalar('Teacher_Momentum', momentum_schedule[min(epoch * niter_per_ep, len(momentum_schedule) - 1)], epoch)
         
-        print(f"Epoch {epoch+1} | Loss: {avg_loss:.5f} | DINO: {avg_dino_loss:.5f} | Gram: {avg_gram_loss:.5f} | LR: {current_lr:.2e}")
+        print(f"Epoch {epoch+1} | Loss: {avg_loss:.5f} | DINO: {avg_dino_loss:.5f} | Gram: {avg_gram_loss:.8f} | LR: {current_lr:.2e}")
         
         # Save best model (student backbone only)
         if avg_loss < best_loss:
@@ -484,7 +484,41 @@ def train():
             student_full_path = os.path.join(save_dir, f"{config['experiment_name']}_student_best.pth")
             torch.save(model.student.state_dict(), student_full_path)
             
+            # Save full teacher (backbone + head)
+            teacher_full_path = os.path.join(save_dir, f"{config['experiment_name']}_teacher_best.pth")
+            torch.save(model.teacher.state_dict(), teacher_full_path)
+            
+            # Save full best checkpoint
+            best_ckpt_path = os.path.join(save_dir, f"{config['experiment_name']}_checkpoint_best.pth")
+            torch.save({
+                'epoch': epoch,
+                'student_state_dict': model.student.state_dict(),
+                'teacher_state_dict': model.teacher.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'best_loss': best_loss,
+                'config': config
+            }, best_ckpt_path)
+            
             print(f"  --> Saved best model (loss: {best_loss:.5f})")
+        
+        # Save latest model (every epoch)
+        latest_backbone_path = os.path.join(save_dir, f"{config['experiment_name']}_backbone_last.pth")
+        torch.save(model.get_student_backbone().state_dict(), latest_backbone_path)
+        
+        latest_student_path = os.path.join(save_dir, f"{config['experiment_name']}_student_last.pth")
+        torch.save(model.student.state_dict(), latest_student_path)
+        
+        latest_ckpt_path = os.path.join(save_dir, f"{config['experiment_name']}_checkpoint_last.pth")
+        torch.save({
+            'epoch': epoch,
+            'student_state_dict': model.student.state_dict(),
+            'teacher_state_dict': model.teacher.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scaler_state_dict': scaler.state_dict(),
+            'best_loss': best_loss,
+            'config': config
+        }, latest_ckpt_path)
         
         # Save checkpoint periodically
         if (epoch + 1) % 50 == 0:
@@ -492,6 +526,7 @@ def train():
             torch.save({
                 'epoch': epoch,
                 'student_state_dict': model.student.state_dict(),
+                'teacher_state_dict': model.teacher.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scaler_state_dict': scaler.state_dict(),
                 'best_loss': best_loss,
