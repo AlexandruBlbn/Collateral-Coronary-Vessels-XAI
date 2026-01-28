@@ -361,10 +361,11 @@ def train():
     global_step = 0
     gram_update_freq = int(config['model']['gram_anchoring']['update_freq'])
     lambda_gram = float(config['model']['gram_anchoring']['lambda_gram'])
+    accum_steps = int(config['optimizer'].get('gradient_accumulation_steps', 1))
     
     print(f"--> Epochs: {epochs}")
     print(f"--> Batch size: {config['data']['batch_size']}")
-    print(f"--> Gradient accumulation: Disabled")
+    print(f"--> Gradient accumulation steps: {accum_steps} (Effective batch: {config['data']['batch_size'] * accum_steps})")
     print(f"--> FP16: {use_fp16}")
     print(f"--> Gradient checkpointing: {config['system']['gradient_checkpointing']}")
     print("-" * 50)
@@ -399,52 +400,56 @@ def train():
                 else:
                     loss = loss_dino
                 
+                # Scale loss for gradient accumulation
+                loss = loss / accum_steps
             
             # Backward pass
             scaler.scale(loss).backward()
             
-            # Update weights
-            # Update LR and WD
-            it = epoch * niter_per_ep + batch_idx
-            
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr_schedule[min(it, len(lr_schedule) - 1)]
-                param_group['weight_decay'] = wd_schedule[min(it, len(wd_schedule) - 1)]
-            
-            # Gradient clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=3.0)
-            
-            # Optimizer step
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            
-            # Update teacher EMA
-            with torch.no_grad():
-                m = momentum_schedule[min(it, len(momentum_schedule) - 1)]
-                model.update_teacher(m)
-            
-            global_step += 1
+            # Optimizer step with gradient accumulation
+            if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1 == len(train_loader)):
+                # Update LR and WD
+                it = epoch * niter_per_ep + batch_idx
+                
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_schedule[min(it, len(lr_schedule) - 1)]
+                    param_group['weight_decay'] = wd_schedule[min(it, len(wd_schedule) - 1)]
+                
+                # Gradient clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=3.0)
+                
+                # Optimizer step
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                
+                # Update teacher EMA
+                with torch.no_grad():
+                    m = momentum_schedule[min(it, len(momentum_schedule) - 1)]
+                    model.update_teacher(m)
+                
+                global_step += 1
+                
+                # TensorBoard step logging
+                if global_step % 10 == 0:
+                    # Log unscaled loss
+                    writer.add_scalar('Loss/train_step', loss.item() * accum_steps, global_step)
+                    writer.add_scalar('Loss/dino_step', loss_dino.item(), global_step)
+                    if config['model']['gram_anchoring']['enabled']:
+                        writer.add_scalar('Loss/gram_step', gram_loss.item(), global_step)
             
             # Logging
-            running_loss += loss.item()
+            running_loss += loss.item() * accum_steps
             running_dino_loss += loss_dino.item()
             if config['model']['gram_anchoring']['enabled']:
                 running_gram_loss += gram_loss.item()
             
             loop.set_postfix({
-                'loss': f"{loss.item():.4f}",
+                'loss': f"{loss.item() * accum_steps:.4f}",
                 'dino': f"{loss_dino.item():.4f}",
                 'gram': f"{gram_loss.item():.4f}" if config['model']['gram_anchoring']['enabled'] else "N/A"
             })
-            
-            # TensorBoard step logging
-            if global_step % 10 == 0:
-                writer.add_scalar('Loss/train_step', loss.item(), global_step)
-                writer.add_scalar('Loss/dino_step', loss_dino.item(), global_step)
-                if config['model']['gram_anchoring']['enabled']:
-                    writer.add_scalar('Loss/gram_step', gram_loss.item(), global_step)
         
         # Epoch statistics
         num_batches = len(train_loader)

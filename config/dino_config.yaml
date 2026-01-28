@@ -19,7 +19,7 @@ model:
     momentum: 0.99    # EMA momentum for anchor update
 
 data:
-  batch_size: 32  
+  batch_size: 16 
   num_workers: 4
   in_channels: 1
   global_crop_size: 256
@@ -37,7 +37,7 @@ optimizer:
   warmup_epochs: 10
   
 
-  gradient_accumulation_steps: 4  # Effective batch = 8 * 4 = 32
+  gradient_accumulation_steps: 2  # Effective batch = 16 * 2 = 32
 
 teacher:
   momentum_start: 0.996
