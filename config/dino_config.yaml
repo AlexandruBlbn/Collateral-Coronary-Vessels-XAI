@@ -1,0 +1,57 @@
+experiment_name: "dinov3_swin_v2_tiny"
+
+model:
+  backbone: "swinv2_tiny_window16_256"  # Options: vit_small_patch16_224, swinv2_tiny_window16_256, convnext_tiny
+  input_size: 256
+  patch_size: 16
+  embed_dim: 384 
+  
+  # DINOv3 Head
+  projection_dim: 8192  
+  hidden_dim: 2048
+  bottleneck_dim: 256
+  num_prototypes: 8192
+
+  gram_anchoring:
+    enabled: true
+    lambda_gram: 0.1  # Weight for gram loss
+    update_freq: 10   # Update anchor every N steps
+    momentum: 0.99    # EMA momentum for anchor update
+
+data:
+  batch_size: 8  
+  num_workers: 4
+  in_channels: 1
+  global_crop_size: 256
+  global_crop_scale: [0.4, 1.0]
+  local_crop_size: 96
+  local_crop_scale: [0.05, 0.4]
+  num_local_crops: 4  
+
+optimizer:
+  lr: 5e-4
+  min_lr: 1e-6
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  epochs: 300
+  warmup_epochs: 10
+  
+
+  gradient_accumulation_steps: 4  # Effective batch = 8 * 4 = 32
+
+teacher:
+  momentum_start: 0.996
+  momentum_end: 0.9995
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 30
+
+student:
+  temperature: 0.1
+
+system:
+  device: "cuda"
+  seed: 42
+  save_dir: "./checkpoints/dino/"
+  use_fp16: true
+  gradient_checkpointing: true
