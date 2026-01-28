@@ -223,42 +223,142 @@ class ARCADEDataset(Dataset):
             self.split = split
             self.task = task
             self.transform = transform
+            
+            # Find the project root by looking for 'Collateral-Coronary-Vessels-XAI' folder
+            json_path_abs = os.path.abspath(json_path)
+            path_parts = json_path_abs.split(os.sep)
+            
+            # Find the project folder (handle both hyphenated and underscored versions)
+            self.project_root = None
+            for i, part in enumerate(path_parts):
+                if 'collateral' in part.lower() and 'coronary' in part.lower():
+                    self.project_root = os.sep.join(path_parts[:i+1])
+                    break
+            
+            if not self.project_root:
+                # Fallback: use directory containing 'data' folder
+                self.project_root = os.path.dirname(os.path.dirname(os.path.dirname(json_path_abs)))
+            
             self.samples = []
+            potential_samples = []
             
             if task == 'SegStenoza':
                 for patient_id, pacienti in self.data[split]['stenoza'].items():
-                    self.samples.append((pacienti['data'], pacienti['label']))
+                    potential_samples.append((pacienti['data'], pacienti['label']))
             elif task == 'SegCoronare':
                 for patient_id, pacienti in self.data[split]['segmentare'].items():
-                    self.samples.append((pacienti['data'], pacienti['label']))
+                    potential_samples.append((pacienti['data'], pacienti['label']))
             elif task == 'Clasificare':
                 if 'stenoza' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['stenoza'].items():
-                        self.samples.append((pacienti['data'], 1))
+                        potential_samples.append((pacienti['data'], 1))
                 if 'segmentare' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['segmentare'].items():
-                        self.samples.append((pacienti['data'], 0))      
+                        potential_samples.append((pacienti['data'], 0))      
             elif task == 'Unsupervised':
                 if 'stenoza' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['stenoza'].items():
-                        self.samples.append((pacienti['data'], None))
+                        potential_samples.append((pacienti['data'], None))
                 if 'segmentare' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['segmentare'].items():
-                        self.samples.append((pacienti['data'], None))
+                        potential_samples.append((pacienti['data'], None))
                 if 'syntax' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['syntax'].items():
-                        self.samples.append((pacienti['data'], None))
+                        potential_samples.append((pacienti['data'], None))
                 
                 if 'extra' in self.data and 'pretrain' in self.data['extra']:
                     for _, item in self.data['extra']['pretrain'].items():
-                        self.samples.append((item['data'], None))
+                        potential_samples.append((item['data'], None))
+
+            # Filter missing files
+            missing_count = 0
+            missing_dirs = set()
+            for sample in potential_samples:
+                img_path = self._resolve_path(sample[0])
+                if os.path.exists(img_path):
+                    self.samples.append(sample)
+                else:
+                    if missing_count == 0:
+                        print(f"DEBUG: First missing file: {sample[0]}")
+                        print(f"DEBUG: Resolved to: {img_path}")
+                    missing_count += 1
+                    missing_dirs.add(os.path.dirname(img_path))
+            
+            if missing_count > 0:
+                print(f"Warning: {missing_count} samples were missing and removed from the dataset.")
+                if len(missing_dirs) < 5:
+                    print(f"Missing directories: {list(missing_dirs)}")
 
     def __len__(self):
             return len(self.samples)
         
+    def _resolve_path(self, path_str):
+            """Resolve path intelligently from project root and fallback locations."""
+            # Normalize backslashes to forward slashes (Windows to Unix)
+            path_str = path_str.replace('\\', '/')
+            
+            # Check if path contains the project folder name (case insensitive)
+            project_folder_variants = [
+                'Collateral Coronary Vessels XAI',
+                'Collateral-Coronary-Vessels-XAI',
+                'collateral coronary vessels xai',
+                'collateral-coronary-vessels-xai'
+            ]
+            
+            relative_part = None
+            for variant in project_folder_variants:
+                if variant.lower() in path_str.lower():
+                    # Find the position after the project folder name
+                    idx = path_str.lower().find(variant.lower())
+                    # Move past the folder name
+                    start_pos = idx + len(variant)
+                    # Skip any separator
+                    while start_pos < len(path_str) and path_str[start_pos] in ['/', '\\']:
+                        start_pos += 1
+                    relative_part = path_str[start_pos:]
+                    break
+            
+            # If no project folder found, assume it's already relative
+            if relative_part is None:
+                relative_part = path_str
+            
+            # Ensure relative_part doesn't start with / or \ to allow os.path.join to work
+            relative_part = relative_part.lstrip('/\\')
+            
+            # Generate variants for case sensitivity issues (specifically TrainB -> trainB)
+            variants = [relative_part]
+            if 'TrainB' in relative_part:
+                variants.append(relative_part.replace('TrainB', 'trainB'))
+            
+            # Try multiple locations
+            candidates = []
+            for variant in variants:
+                candidates.extend([
+                    os.path.join(self.project_root, variant),  # Primary location
+                    os.path.join(self.project_root, 'data', 'ARCADE', variant), # Try inside data/ARCADE
+                    os.path.join('/workspace/Collateral-Coronary-Vessels-XAI', variant),  # Workspace fallback
+                    os.path.join('/root/Collateral-Coronary-Vessels-XAI', variant),  # Root fallback
+                ])
+                
+                # Special handling: if path starts with 'data/', try stripping it to look inside data/ARCADE
+                # e.g. 'data/Extra/...' -> 'data/ARCADE/Extra/...'
+                if variant.startswith('data/'):
+                    stripped = variant[5:]
+                    candidates.append(os.path.join(self.project_root, 'data', 'ARCADE', stripped))
+            
+            # Return first candidate that exists
+            for candidate in candidates:
+                normalized = os.path.normpath(candidate)
+                if os.path.exists(normalized):
+                    return normalized
+            
+            # If none exist, return the primary candidate (will raise FileNotFoundError with proper path)
+            return os.path.normpath(candidates[0])
+    
     def __getitem__(self, idx):
             samples = self.samples[idx]
-            image_path = os.path.join("data/ARCADE/", samples[0])
+            # Resolve path (handles both absolute and relative paths)
+            image_path = self._resolve_path(samples[0])
             # OpenCV este mult mai rapid decat PIL pentru citire si resize
             image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if image is None: raise FileNotFoundError(image_path)
@@ -266,7 +366,7 @@ class ARCADEDataset(Dataset):
             image = image.astype(np.float32) / 255.0
             
             if self.task == 'SegStenoza':
-                label_path = os.path.join("data/ARCADE/", samples[1])
+                label_path = self._resolve_path(samples[1])
                 label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
                 label = cv2.resize(label, (256, 256), interpolation=cv2.INTER_NEAREST)
                 label = np.array(label, dtype=np.float32)

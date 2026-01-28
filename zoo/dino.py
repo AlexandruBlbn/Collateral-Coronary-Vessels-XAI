@@ -7,10 +7,7 @@ from torch.utils.checkpoint import checkpoint
 import copy
 import math
 
-try:
-    from zoo.backbones import get_backbone
-except ImportError:
-    from backbones import get_backbone
+from .backbones import get_backbone
 
 
 class DINOHead(nn.Module):

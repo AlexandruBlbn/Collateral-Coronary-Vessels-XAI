@@ -143,6 +143,50 @@ def save_plotting_samples(model, loader, epoch, save_dir, device, num_samples=40
     return None
 
 
+def measure_vram_usage(model, config, device):
+    """
+    Estimates VRAM usage by performing a dry run with dummy data.
+    """
+    if device.type != 'cuda':
+        return
+
+    print(f"\n{'='*40}\n       VRAM USAGE ESTIMATOR (Dry Run)\n{'='*40}")
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total Parameters:     {total_params:,}")
+    
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    
+    B = config['data']['batch_size']
+    C = config['data']['in_channels']
+    H = config['model']['input_size']
+    
+    # Create dummy inputs
+    imgs = torch.randn(B, C, H, H, device=device)
+    # Mask shape matches image spatial dims for SimMIM usually, or patch dims
+    # Based on MIM.py, mask is (H, W) repeated to pixel level
+    masks = torch.randint(0, 2, (B, H, H), device=device).float()
+    
+    try:
+        with torch.amp.autocast('cuda'):
+            loss, _ = model(imgs, masks)
+        
+        scaler = torch.amp.GradScaler('cuda')
+        scaler.scale(loss).backward()
+        
+        peak = torch.cuda.max_memory_allocated()
+        print(f"Estimated Peak VRAM:  {peak/1024**3:.2f} GB")
+        print(f"Batch Size:           {B}")
+        
+    except Exception as e:
+        print(f"! Could not estimate VRAM: {e}")
+        
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    print("="*40 + "\n")
+
+
 def train():
     device = setupSystem()
     print(f"--> Training on Device: {device}")
@@ -197,6 +241,9 @@ def train():
     best_loss = float('inf')
     epochs = config['optimizer']['epochs']
     global_step = 0
+
+    # Estimate VRAM usage
+    measure_vram_usage(model, config, device)
 
 
     for epoch in range(epochs):

@@ -204,6 +204,64 @@ def save_attention_maps(model, loader, epoch, save_dir, device, num_samples=8):
     return None
 
 
+def measure_vram_usage(model, dino_loss_fn, config, device):
+    """
+    Estimates VRAM usage by performing a dry run with dummy data.
+    """
+    if device.type != 'cuda':
+        return
+
+    print(f"\n{'='*40}\n       VRAM USAGE ESTIMATOR (Dry Run)\n{'='*40}")
+    
+    # 1. Model Stats
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print(f"Total Parameters:     {total_params:,}")
+    print(f"Trainable Parameters: {trainable_params:,}")
+    
+    # 2. Memory Measurement
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    base_mem = torch.cuda.memory_allocated()
+    
+    # Create dummy inputs
+    B = config['data']['batch_size']
+    C = int(config['data']['in_channels'])
+    G_size = config['data']['global_crop_size']
+    L_size = config['data']['local_crop_size']
+    n_local = config['data']['num_local_crops']
+    
+    crops = []
+    # Global
+    for _ in range(2):
+        crops.append(torch.randn(B, C, G_size, G_size, device=device))
+    # Local
+    for _ in range(n_local):
+        crops.append(torch.randn(B, C, L_size, L_size, device=device))
+        
+    try:
+        use_fp16 = config['system']['use_fp16']
+        scaler = torch.amp.GradScaler('cuda', enabled=use_fp16)
+        
+        with torch.amp.autocast('cuda', enabled=use_fp16):
+            s_out, t_out, g_loss = model(crops, update_gram=True)
+            loss = dino_loss_fn(s_out, t_out, 0) + g_loss
+            
+        scaler.scale(loss).backward()
+        
+        peak_mem = torch.cuda.max_memory_allocated()
+        print(f"Estimated Peak VRAM:  {peak_mem / (1024**3):.2f} GB")
+        print(f"Batch Size:           {B}")
+        
+    except Exception as e:
+        print(f"! Could not estimate VRAM: {e}")
+        
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    print("="*40 + "\n")
+
+
 # --- 7. TRAINING ---
 def train():
     device = setup_system(config)
@@ -271,7 +329,7 @@ def train():
     
     # Schedules
     epochs = int(config['optimizer']['epochs'])
-    niter_per_ep = len(train_loader) // int(config['optimizer']['gradient_accumulation_steps'])
+    niter_per_ep = len(train_loader)
     
     lr_schedule = cosine_scheduler(
         float(config['optimizer']['lr']),
@@ -295,17 +353,18 @@ def train():
         niter_per_ep
     )
     
+    # Estimate VRAM usage
+    measure_vram_usage(model, dino_loss, config, device)
+    
     # Training loop
     best_loss = float('inf')
     global_step = 0
-    accumulation_steps = int(config['optimizer']['gradient_accumulation_steps'])
     gram_update_freq = int(config['model']['gram_anchoring']['update_freq'])
     lambda_gram = float(config['model']['gram_anchoring']['lambda_gram'])
     
     print(f"--> Epochs: {epochs}")
     print(f"--> Batch size: {config['data']['batch_size']}")
-    print(f"--> Gradient accumulation: {accumulation_steps}")
-    print(f"--> Effective batch size: {config['data']['batch_size'] * accumulation_steps}")
+    print(f"--> Gradient accumulation: Disabled")
     print(f"--> FP16: {use_fp16}")
     print(f"--> Gradient checkpointing: {config['system']['gradient_checkpointing']}")
     print("-" * 50)
@@ -340,52 +399,49 @@ def train():
                 else:
                     loss = loss_dino
                 
-                # Scale for gradient accumulation
-                loss = loss / accumulation_steps
             
             # Backward pass
             scaler.scale(loss).backward()
             
-            # Update weights after accumulation
-            if (batch_idx + 1) % accumulation_steps == 0:
-                # Update LR and WD
-                it = epoch * niter_per_ep + batch_idx // accumulation_steps
-                
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr_schedule[min(it, len(lr_schedule) - 1)]
-                    param_group['weight_decay'] = wd_schedule[min(it, len(wd_schedule) - 1)]
-                
-                # Gradient clipping
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=3.0)
-                
-                # Optimizer step
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                
-                # Update teacher EMA
-                with torch.no_grad():
-                    m = momentum_schedule[min(it, len(momentum_schedule) - 1)]
-                    model.update_teacher(m)
-                
-                global_step += 1
+            # Update weights
+            # Update LR and WD
+            it = epoch * niter_per_ep + batch_idx
+            
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr_schedule[min(it, len(lr_schedule) - 1)]
+                param_group['weight_decay'] = wd_schedule[min(it, len(wd_schedule) - 1)]
+            
+            # Gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=3.0)
+            
+            # Optimizer step
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            
+            # Update teacher EMA
+            with torch.no_grad():
+                m = momentum_schedule[min(it, len(momentum_schedule) - 1)]
+                model.update_teacher(m)
+            
+            global_step += 1
             
             # Logging
-            running_loss += loss.item() * accumulation_steps
+            running_loss += loss.item()
             running_dino_loss += loss_dino.item()
             if config['model']['gram_anchoring']['enabled']:
                 running_gram_loss += gram_loss.item()
             
             loop.set_postfix({
-                'loss': f"{loss.item() * accumulation_steps:.4f}",
+                'loss': f"{loss.item():.4f}",
                 'dino': f"{loss_dino.item():.4f}",
                 'gram': f"{gram_loss.item():.4f}" if config['model']['gram_anchoring']['enabled'] else "N/A"
             })
             
             # TensorBoard step logging
             if global_step % 10 == 0:
-                writer.add_scalar('Loss/train_step', loss.item() * accumulation_steps, global_step)
+                writer.add_scalar('Loss/train_step', loss.item(), global_step)
                 writer.add_scalar('Loss/dino_step', loss_dino.item(), global_step)
                 if config['model']['gram_anchoring']['enabled']:
                     writer.add_scalar('Loss/gram_step', gram_loss.item(), global_step)
@@ -454,4 +510,29 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    import traceback
+    from datetime import datetime
+    
+    try:
+        train()
+    except Exception as e:
+        # Save traceback to file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        error_file = os.path.join(project_root, f"error_log_{timestamp}.txt")
+        
+        with open(error_file, 'w') as f:
+            f.write(f"Error occurred at: {datetime.now()}\n")
+            f.write("=" * 80 + "\n\n")
+            f.write("Exception Type: " + str(type(e).__name__) + "\n")
+            f.write("Exception Message: " + str(e) + "\n\n")
+            f.write("Full Traceback:\n")
+            f.write("=" * 80 + "\n")
+            traceback.print_exc(file=f)
+        
+        print(f"\n{'='*80}")
+        print(f"ERROR: {type(e).__name__}: {e}")
+        print(f"Full traceback saved to: {error_file}")
+        print(f"{'='*80}\n")
+        
+        # Re-raise the exception
+        raise
