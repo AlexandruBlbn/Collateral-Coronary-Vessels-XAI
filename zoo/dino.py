@@ -92,11 +92,12 @@ class GramAnchor(nn.Module):
         """
         Compute Gram anchoring loss.
         Encourages current batch Gram matrix to match the anchor.
+        Features should be L2-normalized before calling this.
         """
-        # Current batch Gram matrix
+        # Current batch Gram matrix (features should already be normalized)
         batch_gram = torch.mm(features.T, features) / features.shape[0]
         
-        # Frobenius norm difference
+        # Frobenius norm difference with detached anchor
         loss = F.mse_loss(batch_gram, self.gram_anchor.detach())
         
         return loss
@@ -107,12 +108,32 @@ class MultiCropWrapper(nn.Module):
     Wrapper to process multiple crops through backbone.
     Handles gradient checkpointing for memory efficiency.
     Processes crops of different sizes separately.
+    All backbones (ViT, Swin, ConvNext) are handled uniformly.
     """
-    def __init__(self, backbone, head, use_checkpoint: bool = False):
+    def __init__(self, backbone, head, use_checkpoint: bool = False, target_size: int = 256):
         super().__init__()
         self.backbone = backbone
         self.head = head
         self.use_checkpoint = use_checkpoint
+        self.target_size = target_size
+        
+        # Cache for intermediate features (used by Gram loss)
+        self._cached_features = None
+        self._cache_enabled = False
+        
+    def enable_feature_cache(self):
+        """Enable caching of intermediate features for Gram loss."""
+        self._cache_enabled = True
+        self._cached_features = None
+        
+    def disable_feature_cache(self):
+        """Disable and clear feature cache."""
+        self._cache_enabled = False
+        self._cached_features = None
+        
+    def get_cached_features(self):
+        """Get cached intermediate features (global crops only)."""
+        return self._cached_features
         
     def forward(self, x):
         # x can be a list of tensors (multi-crop) or single tensor
@@ -120,6 +141,7 @@ class MultiCropWrapper(nn.Module):
             # Group crops by size to process together
             # Assume first 2 are global crops (same size), rest are local crops (same size)
             outputs = []
+            batch_size = x[0].shape[0]
             
             # Process global crops (256x256)
             global_crops = torch.cat(x[:2], dim=0)
@@ -127,13 +149,15 @@ class MultiCropWrapper(nn.Module):
                 global_features = checkpoint(self._forward_backbone, global_crops, use_reentrant=False)
             else:
                 global_features = self._forward_backbone(global_crops)
-            global_output = self.head(global_features)
             
-            # Split global outputs back
-            batch_size = x[0].shape[0]
+            # Cache global features for Gram loss (before head)
+            if self._cache_enabled:
+                self._cached_features = global_features
+            
+            global_output = self.head(global_features)
             outputs.extend(torch.split(global_output, batch_size, dim=0))
             
-            # Process local crops (96x96) if any
+            # Process local crops if any
             if len(x) > 2:
                 local_crops = torch.cat(x[2:], dim=0)
                 if self.use_checkpoint and self.training:
@@ -141,8 +165,6 @@ class MultiCropWrapper(nn.Module):
                 else:
                     local_features = self._forward_backbone(local_crops)
                 local_output = self.head(local_features)
-                
-                # Split local outputs back
                 outputs.extend(torch.split(local_output, batch_size, dim=0))
             
             return outputs
@@ -154,30 +176,37 @@ class MultiCropWrapper(nn.Module):
             return self.head(features)
     
     def _forward_backbone(self, x):
-        # Resize to 256x256 if needed (for local crops with fixed-size backbones like Swin)
-        if x.shape[-1] != 256 or x.shape[-2] != 256:
-            x = F.interpolate(x, size=(256, 256), mode='bilinear', align_corners=False)
+        """
+        Forward through backbone with consistent handling for all architectures.
+        Resizes input to target_size for backbone compatibility.
+        """
+        # Resize to target size if needed (ensures all backbones get consistent input)
+        if x.shape[-1] != self.target_size or x.shape[-2] != self.target_size:
+            x = F.interpolate(x, size=(self.target_size, self.target_size), mode='bilinear', align_corners=False)
         
         features = self.backbone(x)
-        # Global average pooling if needed (for CNN backbones or ViT with spatial output)
+        
+        # Global average pooling - handles all backbone output formats uniformly
+        # ViT/Swin wrapped: (B, C, H, W) after SWIN_permute/ViT_16windows256
+        # ConvNext: (B, C, H, W)
+        # Raw ViT tokens: (B, N, D)
         if len(features.shape) == 4:  # (B, C, H, W)
             features = features.mean(dim=[2, 3])
         elif len(features.shape) == 3:  # (B, N, D) - ViT tokens
             features = features.mean(dim=1)
+        
         return features
     
     def get_intermediate_features(self, x):
-        """Get features before projection head for Gram computation."""
-        # Resize to 256x256 if needed
-        if x.shape[-1] != 256 or x.shape[-2] != 256:
-            x = F.interpolate(x, size=(256, 256), mode='bilinear', align_corners=False)
+        """
+        Get features before projection head for Gram computation.
+        Prefer using cached features from forward() to avoid double computation.
+        """
+        if self._cached_features is not None:
+            return self._cached_features
         
-        features = self.backbone(x)
-        if len(features.shape) == 4:
-            features = features.mean(dim=[2, 3])
-        elif len(features.shape) == 3:
-            features = features.mean(dim=1)
-        return features
+        # Fallback: compute features directly
+        return self._forward_backbone(x)
 
 
 class DINOv3Loss(nn.Module):
@@ -332,11 +361,12 @@ class DINOv3(nn.Module):
             out_dim=projection_dim
         )
         
-        # Wrap student
+        # Wrap student with consistent target size for all backbones
         self.student = MultiCropWrapper(
             student_backbone,
             student_head,
-            use_checkpoint=use_checkpoint
+            use_checkpoint=use_checkpoint,
+            target_size=256  # All backbones expect 256x256 input
         )
         
         # Create teacher as EMA copy of student
@@ -373,31 +403,37 @@ class DINOv3(nn.Module):
             teacher_output: list of projection outputs (only global crops)
             gram_loss: Gram anchoring loss (if enabled)
         """
-        # Student forward on all crops
+        # Enable feature caching for Gram loss (avoids double forward)
+        if self.use_gram_anchoring:
+            self.student.enable_feature_cache()
+        
+        # Student forward on all crops (features are cached internally)
         student_output = self.student(crops)
         
         # Teacher forward only on global crops
         with torch.no_grad():
             teacher_output = self.teacher(crops[:2])  # Only global crops
         
-        # Gram anchoring
+        # Gram anchoring - uses cached features from student forward
         gram_loss = torch.tensor(0.0, device=crops[0].device)
         if self.use_gram_anchoring:
-            # Get intermediate features
-            with torch.no_grad():
-                global_crops = torch.cat(crops[:2], dim=0)
-                features = self.student.get_intermediate_features(global_crops)
-                #features = F.normalize(features, dim=-1, p=2) # <-- COMENTEAZA LINIA ASTA
+            # Get cached features from student forward (no extra computation)
+            features = self.student.get_cached_features()
+            
+            if features is not None:
+                # L2 normalize features before Gram computation (critical for stability)
+                features_normalized = F.normalize(features, dim=-1, p=2)
                 
+                # Update anchor with normalized features (no gradients)
                 if update_gram:
-                    self.gram_anchor.update_anchor(features)
+                    with torch.no_grad():
+                        self.gram_anchor.update_anchor(features_normalized.detach())
+                
+                # Compute Gram loss with normalized features
+                gram_loss = self.gram_anchor.compute_gram_loss(features_normalized)
             
-            # Compute Gram loss (with gradients)
-            global_crops_grad = torch.cat(crops[:2], dim=0)
-            features_grad = self.student.get_intermediate_features(global_crops_grad)
-            #features_grad = F.normalize(features_grad, dim=-1, p=2) # <-- COMENTEAZA SI ASTA
-            
-            gram_loss = self.gram_anchor.compute_gram_loss(features_grad)
+            # Disable cache after use
+            self.student.disable_feature_cache()
         
         return student_output, teacher_output, gram_loss
     

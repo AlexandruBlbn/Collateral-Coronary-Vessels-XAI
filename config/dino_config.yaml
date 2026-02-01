@@ -14,7 +14,7 @@ model:
 
   gram_anchoring:
     enabled: true
-    lambda_gram: 0.5  # Weight for gram loss
+    lambda_gram: 0.1  # Weight for gram loss (reduced for stability)
     update_freq: 10   # Update anchor every N steps
     momentum: 0.99    # EMA momentum for anchor update
 
