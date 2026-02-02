@@ -1,4 +1,5 @@
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,6 +9,47 @@ import copy
 import math
 
 from .backbones import get_backbone
+
+
+def _strip_prefix_if_present(state_dict, prefix):
+    return {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
+
+
+def _load_backbone_checkpoint(backbone, ckpt_path: str):
+    """Load backbone weights from a checkpoint into the underlying timm model if present."""
+    if not ckpt_path:
+        return False
+    if not os.path.exists(ckpt_path):
+        print(f"! Pretrained backbone not found: {ckpt_path}")
+        return False
+
+    ckpt = torch.load(ckpt_path, map_location='cpu')
+
+    # Unwrap common checkpoint formats
+    if isinstance(ckpt, dict):
+        if 'state_dict' in ckpt:
+            ckpt = ckpt['state_dict']
+        elif 'model' in ckpt:
+            ckpt = ckpt['model']
+        elif 'backbone' in ckpt:
+            ckpt = ckpt['backbone']
+
+    if not isinstance(ckpt, dict):
+        print("! Unsupported checkpoint format for backbone.")
+        return False
+
+    # Strip DDP prefixes if present
+    ckpt = _strip_prefix_if_present(ckpt, 'module.')
+
+    # Load into inner model if wrapped
+    target = backbone.model if hasattr(backbone, 'model') else backbone
+    missing, unexpected = target.load_state_dict(ckpt, strict=False)
+    if missing:
+        print(f"! Missing keys when loading backbone: {len(missing)}")
+    if unexpected:
+        print(f"! Unexpected keys when loading backbone: {len(unexpected)}")
+    print(f"--> Loaded pretrained backbone from {ckpt_path}")
+    return True
 
 
 class DINOHead(nn.Module):
@@ -326,8 +368,10 @@ class DINOv3(nn.Module):
         hidden_dim: int = 2048,
         bottleneck_dim: int = 256,
         use_gram_anchoring: bool = True,
-        gram_momentum: float = 0.99,
-        use_checkpoint: bool = True
+        gram_momentum: float = 0.995,
+        use_checkpoint: bool = True,
+        pretrained_backbone: bool = False,
+        pretrained_backbone_path: str = ""
     ):
         super().__init__()
         
@@ -337,8 +381,11 @@ class DINOv3(nn.Module):
         student_backbone = get_backbone(
             model_name=backbone_name,
             in_channels=in_channels,
-            pretrained=False
+            pretrained=pretrained_backbone
         )
+
+        if pretrained_backbone_path:
+            _load_backbone_checkpoint(student_backbone, pretrained_backbone_path)
         
         # Auto-detect embed_dim from backbone output
         if embed_dim is None:
@@ -375,6 +422,7 @@ class DINOv3(nn.Module):
         # Freeze teacher
         for param in self.teacher.parameters():
             param.requires_grad = False
+        self.teacher.eval()
             
         # Gram anchoring module
         if use_gram_anchoring:
@@ -384,6 +432,12 @@ class DINOv3(nn.Module):
             )
         
         self.embed_dim = embed_dim
+
+    def train(self, mode: bool = True):
+        """Override to keep teacher in eval mode while student follows mode."""
+        super().train(mode)
+        self.teacher.eval()
+        return self
         
     @torch.no_grad()
     def update_teacher(self, momentum: float):

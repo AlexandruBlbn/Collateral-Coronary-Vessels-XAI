@@ -291,6 +291,7 @@ def train():
     
     train_loader = get_dino_dataloader(json_path, config)
     print(f"--> Total Pretraining Images: {len(train_loader.dataset)}")
+    accum_steps = int(config['optimizer'].get('gradient_accumulation_steps', 1))
     
     # Model - embed_dim is auto-detected from backbone
     model = DINOv3(
@@ -302,8 +303,18 @@ def train():
         bottleneck_dim=int(config['model']['bottleneck_dim']),
         use_gram_anchoring=config['model']['gram_anchoring']['enabled'],
         gram_momentum=float(config['model']['gram_anchoring']['momentum']),
-        use_checkpoint=config['system']['gradient_checkpointing']
+        use_checkpoint=config['system']['gradient_checkpointing'],
+        pretrained_backbone=bool(config['model'].get('pretrained_backbone', False)),
+        pretrained_backbone_path=str(config['model'].get('pretrained_backbone_path', ""))
     ).to(device)
+
+    # FP16 scaler
+    use_fp16 = bool(config['system']['use_fp16']) and device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda', enabled=use_fp16)
+
+    # Keep teacher weights in FP16 to save VRAM (student stays in FP32)
+    if use_fp16:
+        model.teacher.half()
     
     # Loss
     dino_loss = DINOv3Loss(
@@ -323,13 +334,28 @@ def train():
         weight_decay=float(config['optimizer']['weight_decay'])
     )
     
-    # FP16 scaler
-    use_fp16 = config['system']['use_fp16']
-    scaler = torch.amp.GradScaler('cuda', enabled=use_fp16)
-    
+    # Resume (optional)
+    start_epoch = 0
+    best_loss = float('inf')
+    resume_enabled = bool(config['system'].get('resume', False))
+    resume_path = str(config['system'].get('resume_from', "")).strip()
+    if resume_enabled and resume_path:
+        if os.path.exists(resume_path):
+            ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+            model.student.load_state_dict(ckpt.get('student_state_dict', {}))
+            model.teacher.load_state_dict(ckpt.get('teacher_state_dict', {}))
+            optimizer.load_state_dict(ckpt.get('optimizer_state_dict', {}))
+            if 'scaler_state_dict' in ckpt:
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
+            start_epoch = int(ckpt.get('epoch', -1)) + 1
+            best_loss = float(ckpt.get('best_loss', best_loss))
+            print(f"--> Resumed from {resume_path} (epoch {start_epoch})")
+        else:
+            print(f"! Resume checkpoint not found: {resume_path}")
+
     # Schedules
     epochs = int(config['optimizer']['epochs'])
-    niter_per_ep = len(train_loader)
+    niter_per_ep = (len(train_loader) + accum_steps - 1) // accum_steps
     
     lr_schedule = cosine_scheduler(
         float(config['optimizer']['lr']),
@@ -357,11 +383,11 @@ def train():
     measure_vram_usage(model, dino_loss, config, device)
     
     # Training loop
-    best_loss = float('inf')
-    global_step = 0
+    global_step = start_epoch * niter_per_ep
     gram_update_freq = int(config['model']['gram_anchoring']['update_freq'])
     lambda_gram = float(config['model']['gram_anchoring']['lambda_gram'])
-    accum_steps = int(config['optimizer'].get('gradient_accumulation_steps', 1))
+    gram_start_epoch = int(config['model']['gram_anchoring'].get('start_epoch', 0))
+    # accum_steps already set above for schedule correctness
     
     print(f"--> Epochs: {epochs}")
     print(f"--> Batch size: {config['data']['batch_size']}")
@@ -370,7 +396,7 @@ def train():
     print(f"--> Gradient checkpointing: {config['system']['gradient_checkpointing']}")
     print("-" * 50)
     
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         model.train()
         running_loss = 0.0
         running_dino_loss = 0.0
@@ -385,17 +411,18 @@ def train():
             crops = [c.to(device, non_blocking=True) for c in crops]
             
             # Determine if we should update Gram anchor
-            update_gram = (global_step % gram_update_freq == 0) and config['model']['gram_anchoring']['enabled']
+            gram_enabled = config['model']['gram_anchoring']['enabled'] and epoch >= gram_start_epoch
+            update_gram = (global_step % gram_update_freq == 0) and gram_enabled
             
             # Forward pass with mixed precision
-            with torch.amp.autocast('cuda', enabled=use_fp16):
+            with torch.amp.autocast(device_type=device.type, enabled=use_fp16):
                 student_output, teacher_output, gram_loss = model(crops, update_gram=update_gram)
                 
                 # DINO loss
                 loss_dino = dino_loss(student_output, teacher_output, epoch)
                 
                 # Total loss
-                if config['model']['gram_anchoring']['enabled']:
+                if gram_enabled:
                     loss = loss_dino + lambda_gram * gram_loss
                 else:
                     loss = loss_dino
@@ -409,7 +436,8 @@ def train():
             # Optimizer step with gradient accumulation
             if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1 == len(train_loader)):
                 # Update LR and WD
-                it = epoch * niter_per_ep + batch_idx
+                step_idx = batch_idx // accum_steps
+                it = epoch * niter_per_ep + step_idx
                 
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = lr_schedule[min(it, len(lr_schedule) - 1)]
@@ -417,7 +445,7 @@ def train():
                 
                 # Gradient clipping
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=3.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=3.0)
                 
                 # Optimizer step
                 scaler.step(optimizer)
@@ -436,38 +464,39 @@ def train():
                     # Log unscaled loss
                     writer.add_scalar('Loss/train_step', loss.item() * accum_steps, global_step)
                     writer.add_scalar('Loss/dino_step', loss_dino.item(), global_step)
-                    if config['model']['gram_anchoring']['enabled']:
+                    if gram_enabled:
                         writer.add_scalar('Loss/gram_step', gram_loss.item(), global_step)
+                    writer.add_scalar('Grad/grad_norm', float(grad_norm), global_step)
             
             # Logging
             running_loss += loss.item() * accum_steps
             running_dino_loss += loss_dino.item()
-            if config['model']['gram_anchoring']['enabled']:
+            if gram_enabled:
                 running_gram_loss += gram_loss.item()
             
             loop.set_postfix({
                 'loss': f"{loss.item() * accum_steps:.4f}",
                 'dino': f"{loss_dino.item():.4f}",
-                'gram': f"{gram_loss.item():.8f}" if config['model']['gram_anchoring']['enabled'] else "N/A"
+                'gram': f"{gram_loss.item():.8f}" if gram_enabled else "N/A"
             })
         
         # Epoch statistics
         num_batches = len(train_loader)
         avg_loss = running_loss / num_batches
         avg_dino_loss = running_dino_loss / num_batches
-        avg_gram_loss = running_gram_loss / num_batches if config['model']['gram_anchoring']['enabled'] else 0
+        avg_gram_loss = running_gram_loss / num_batches if gram_enabled else 0
         
         current_lr = optimizer.param_groups[0]['lr']
         
         # TensorBoard epoch logging
         writer.add_scalar('Loss/train_epoch', avg_loss, epoch)
         writer.add_scalar('Loss/dino_epoch', avg_dino_loss, epoch)
-        if config['model']['gram_anchoring']['enabled']:
+        if gram_enabled:
             writer.add_scalar('Loss/gram_epoch', avg_gram_loss, epoch)
         writer.add_scalar('Learning_Rate', current_lr, epoch)
         writer.add_scalar('Teacher_Momentum', momentum_schedule[min(epoch * niter_per_ep, len(momentum_schedule) - 1)], epoch)
         
-        weighted_gram = avg_gram_loss * lambda_gram if config['model']['gram_anchoring']['enabled'] else 0.0
+        weighted_gram = avg_gram_loss * lambda_gram if gram_enabled else 0.0
         print(f"Epoch {epoch+1} | Loss: {avg_loss:.5f} | DINO: {avg_dino_loss:.5f} | Gram(W): {weighted_gram:.4f} | Gram(Raw): {avg_gram_loss:.2e} | LR: {current_lr:.2e}")
         
         # Save best model (student backbone only)

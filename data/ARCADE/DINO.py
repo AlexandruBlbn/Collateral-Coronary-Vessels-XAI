@@ -68,9 +68,9 @@ class MultiCropAugmentation:
             ),
             T.RandomHorizontalFlip(p=0.5),
             T.RandomApply([
-                T.ColorJitter(brightness=0.4, contrast=0.4)
-            ], p=0.8),
-            T.RandomApply([GaussianBlur(sigma=[0.1, 2.0])], p=1.0),
+                T.ColorJitter(brightness=0.2, contrast=0.2)
+            ], p=0.6),
+            T.RandomApply([GaussianBlur(sigma=[0.1, 1.5])], p=0.4),
         ])
         
         self.global_transform_2 = T.Compose([
@@ -81,10 +81,10 @@ class MultiCropAugmentation:
             ),
             T.RandomHorizontalFlip(p=0.5),
             T.RandomApply([
-                T.ColorJitter(brightness=0.4, contrast=0.4)
-            ], p=0.8),
-            T.RandomApply([GaussianBlur(sigma=[0.1, 2.0])], p=0.1),
-            T.RandomApply([Solarization(threshold=0.5)], p=0.2),
+                T.ColorJitter(brightness=0.2, contrast=0.2)
+            ], p=0.6),
+            T.RandomApply([GaussianBlur(sigma=[0.1, 1.5])], p=0.1),
+            T.RandomApply([Solarization(threshold=0.5)], p=0.05),
         ])
         
         # Local crop transform (smaller patches)
@@ -96,9 +96,9 @@ class MultiCropAugmentation:
             ),
             T.RandomHorizontalFlip(p=0.5),
             T.RandomApply([
-                T.ColorJitter(brightness=0.4, contrast=0.4)
-            ], p=0.8),
-            T.RandomApply([GaussianBlur(sigma=[0.1, 2.0])], p=0.5),
+                T.ColorJitter(brightness=0.2, contrast=0.2)
+            ], p=0.6),
+            T.RandomApply([GaussianBlur(sigma=[0.1, 1.5])], p=0.3),
         ])
         
     def __call__(self, image):

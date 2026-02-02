@@ -7,44 +7,48 @@ model:
   embed_dim: 384 
   
   # DINOv3 Head
-  projection_dim: 512 
+  projection_dim: 8192
   hidden_dim: 2048
   bottleneck_dim: 256
-  num_prototypes: 512
+  num_prototypes: 1024
+
+  # Pretrained backbone (optional)
+  pretrained_backbone: true
+  pretrained_backbone_path: "weights/simmim_pretrain_swin_tiny_v2_patch4_backbone_best.pth"  # e.g. ./checkpoints/simmim_backbone.pth
 
   gram_anchoring:
     enabled: true
-    lambda_gram: 0.1  # Weight for gram loss (reduced for stability)
+    start_epoch: 250  # Start gram anchoring after stabilization
+    lambda_gram: 0.0  # Temporarily disable gram contribution
     update_freq: 10   # Update anchor every N steps
-    momentum: 0.99    # EMA momentum for anchor update
+    momentum: 0.995    # EMA momentum for anchor update
 
 data:
   batch_size: 16
   num_workers: 4
   in_channels: 1
   global_crop_size: 256
-  global_crop_scale: [0.4, 1.0]
-  local_crop_size: 96
-  local_crop_scale: [0.05, 0.4]
-  num_local_crops: 4  
+  global_crop_scale: [0.4, 0.9]
+  local_crop_size: 64
+  local_crop_scale: [0.2, 0.4]
+  num_local_crops:  6
 
 optimizer:
-  lr: 1.0e-4
+  lr: 3e-5
   min_lr: 1e-6
-  weight_decay: 0.04
+  weight_decay: 0.1
   weight_decay_end: 0.4
   epochs: 300
-  warmup_epochs: 10
-  
+  warmup_epochs: 5 
 
-  gradient_accumulation_steps: 2  # Effective batch = 16 * 2 = 32
+  gradient_accumulation_steps: 2 # Effective batch = 16 * 1 = 16
 
 teacher:
-  momentum_start: 0.996
+  momentum_start: 0.98
   momentum_end: 0.9995
   warmup_teacher_temp: 0.04
-  teacher_temp: 0.05
-  warmup_teacher_temp_epochs: 30
+  teacher_temp: 0.004
+  warmup_teacher_temp_epochs: 20
 
 student:
   temperature: 0.1
@@ -55,3 +59,5 @@ system:
   save_dir: "./checkpoints/dino/"
   use_fp16: true
   gradient_checkpointing: true
+  resume: false
+  resume_from: "./checkpoints/dino/dinov3_swin_v2_tiny_checkpoint_last.pth"  # e.g. ./checkpoints/dino/dinov3_swin_v2_tiny_checkpoint_last.pth

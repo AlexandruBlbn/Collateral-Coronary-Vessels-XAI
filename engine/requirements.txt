@@ -10,3 +10,5 @@ timm
 torchinfo
 seaborn
 pandas
+
+pip install torch torchvision pyyaml numpy matplotlib tqdm tensorboard opencv-python-headless timm torchinfo seaborn pandas
