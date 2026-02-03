@@ -1,0 +1,16 @@
+Error occurred at: 2026-02-03 12:55:41.589611
+================================================================================
+
+Exception Type: RuntimeError
+Exception Message: unscale_() has already been called on this optimizer since the last update().
+
+Full Traceback:
+================================================================================
+Traceback (most recent call last):
+  File "/workspace/Collateral-Coronary-Vessels-XAI/engine/dino_trained.py", line 618, in <module>
+    train()
+  File "/workspace/Collateral-Coronary-Vessels-XAI/engine/dino_trained.py", line 472, in train
+    scaler.unscale_(optimizer)
+  File "/venv/main/lib/python3.12/site-packages/torch/amp/grad_scaler.py", line 328, in unscale_
+    raise RuntimeError(
+RuntimeError: unscale_() has already been called on this optimizer since the last update().

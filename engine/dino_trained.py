@@ -18,6 +18,12 @@ project_root = os.path.dirname(current_dir)
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+# --- HF CACHE (avoid stale file handle on network mounts) ---
+hf_cache_dir = os.path.join(project_root, '.hf_cache')
+os.makedirs(hf_cache_dir, exist_ok=True)
+os.environ.setdefault('HF_HOME', hf_cache_dir)
+os.environ.setdefault('HUGGINGFACE_HUB_CACHE', os.path.join(hf_cache_dir, 'hub'))
+
 # --- 2. IMPORTS ---
 from data.ARCADE.dataloader import ARCADEDataset
 from data.ARCADE.DINO import ArcadeDatasetDINO, collate_dino
@@ -162,24 +168,37 @@ def save_attention_maps(model, loader, epoch, save_dir, device, num_samples=8):
                     axes[0].set_title('Original Image')
                     axes[0].axis('off')
                     
-                    # Attention heatmap - resize to match original
+                    # Attention heatmap - robust normalization + smooth + resize to match original
                     attn_tensor = torch.from_numpy(attn_avg).float()
                     if len(attn_tensor.shape) == 2:
                         attn_tensor = attn_tensor.unsqueeze(0).unsqueeze(0)
+
+                    # Contrast stretching (5-95 percentile) for clearer maps
+                    flat = attn_tensor.flatten()
+                    q_low = torch.quantile(flat, 0.05)
+                    q_high = torch.quantile(flat, 0.95)
+                    attn_tensor = attn_tensor.clamp(q_low, q_high)
+                    attn_tensor = (attn_tensor - q_low) / (q_high - q_low + 1e-8)
+
+                    # Mild smoothing to reduce blocky artifacts
+                    attn_tensor = F.avg_pool2d(attn_tensor, kernel_size=3, stride=1, padding=1)
+
+                    # Resize to original image size
+                    h, w = orig_img.shape
                     attn_resized = F.interpolate(
                         attn_tensor,
-                        size=(256, 256),
+                        size=(h, w),
                         mode='bilinear',
                         align_corners=False
                     )[0, 0].numpy()
                     
-                    axes[1].imshow(attn_resized, cmap='hot')
+                    axes[1].imshow(attn_resized, cmap='inferno', vmin=0.0, vmax=1.0)
                     axes[1].set_title('Feature Importance Map')
                     axes[1].axis('off')
                     
                     # Overlay
                     axes[2].imshow(orig_img, cmap='gray')
-                    axes[2].imshow(attn_resized, cmap='hot', alpha=0.5)
+                    axes[2].imshow(attn_resized, cmap='inferno', alpha=0.55, vmin=0.0, vmax=1.0)
                     axes[2].set_title('Overlay')
                     axes[2].axis('off')
                     
@@ -427,6 +446,12 @@ def train():
                 else:
                     loss = loss_dino
                 
+                # Check for NaN/Inf loss to prevent explosion
+                if not torch.isfinite(loss):
+                    print(f"Warning: Loss is {loss.item()} at epoch {epoch+1}, step {global_step}. Skipping step.")
+                    optimizer.zero_grad()
+                    continue
+                
                 # Scale loss for gradient accumulation
                 loss = loss / accum_steps
             
@@ -443,9 +468,16 @@ def train():
                     param_group['lr'] = lr_schedule[min(it, len(lr_schedule) - 1)]
                     param_group['weight_decay'] = wd_schedule[min(it, len(wd_schedule) - 1)]
                 
-                # Gradient clipping
+                # Gradient clipping - more aggressive to prevent explosion
                 scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=3.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.student.parameters(), max_norm=1.0)
+                
+                # Skip step if gradients exploded
+                if not torch.isfinite(grad_norm) or grad_norm > 100:
+                    print(f"Warning: Gradient norm {grad_norm:.2f} at epoch {epoch+1}, step {global_step}. Skipping step.")
+                    optimizer.zero_grad()
+                    scaler.update()  # Reset scaler state to avoid "unscale_ already called" error
+                    continue
                 
                 # Optimizer step
                 scaler.step(optimizer)
@@ -549,19 +581,6 @@ def train():
             'best_loss': best_loss,
             'config': config
         }, latest_ckpt_path)
-        
-        # Save checkpoint periodically
-        if (epoch + 1) % 50 == 0:
-            checkpoint_path = os.path.join(save_dir, f"{config['experiment_name']}_epoch_{epoch+1}.pth")
-            torch.save({
-                'epoch': epoch,
-                'student_state_dict': model.student.state_dict(),
-                'teacher_state_dict': model.teacher.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
-                'best_loss': best_loss,
-                'config': config
-            }, checkpoint_path)
         
         # Visualize attention maps
         if (epoch + 1) % 10 == 0 or epoch == 0:

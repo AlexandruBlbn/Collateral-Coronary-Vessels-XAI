@@ -121,6 +121,7 @@ class GramAnchor(nn.Module):
         """
         # Compute current batch Gram matrix
         # G = F^T @ F / B
+        features = features.float()
         batch_gram = torch.mm(features.T, features) / features.shape[0]
         
         if not self.initialized:
@@ -137,6 +138,7 @@ class GramAnchor(nn.Module):
         Features should be L2-normalized before calling this.
         """
         # Current batch Gram matrix (features should already be normalized)
+        features = features.float()
         batch_gram = torch.mm(features.T, features) / features.shape[0]
         
         # Frobenius norm difference with detached anchor
@@ -301,18 +303,24 @@ class DINOv3Loss(nn.Module):
         teacher_output: list of tensors, only global crops
         epoch: current epoch for temperature scheduling
         """
-        student_out = torch.cat(student_output, dim=0)
-        teacher_out = torch.cat(teacher_output, dim=0)
+        student_out = torch.cat(student_output, dim=0).float()
+        teacher_out = torch.cat(teacher_output, dim=0).float()
         
         # Get temperatures
         student_temp = self.student_temp
         teacher_temp = self.teacher_temp_schedule[min(epoch, len(self.teacher_temp_schedule) - 1)]
         
-        # Student: softmax with temperature
-        student_probs = F.log_softmax(student_out / student_temp, dim=-1)
+        # Safety: ensure minimum temperature to prevent numerical explosion
+        teacher_temp = max(float(teacher_temp), 0.01)
+        
+        # Student: softmax with temperature (clamp for stability)
+        student_logits = (student_out / student_temp).clamp(-80, 80)
+        student_probs = F.log_softmax(student_logits, dim=-1)
         
         # Teacher: softmax with temperature and centering
-        teacher_probs = F.softmax((teacher_out - self.center) / teacher_temp, dim=-1)
+        # Clamp logits to prevent numerical instability with very low temperatures
+        teacher_logits = (teacher_out - self.center) / teacher_temp
+        teacher_probs = F.softmax(teacher_logits.clamp(-80, 80), dim=-1)
         teacher_probs = teacher_probs.detach()
         
         # Cross-entropy loss
@@ -476,6 +484,7 @@ class DINOv3(nn.Module):
             
             if features is not None:
                 # L2 normalize features before Gram computation (critical for stability)
+                features = features.float()
                 features_normalized = F.normalize(features, dim=-1, p=2)
                 
                 # Update anchor with normalized features (no gradients)

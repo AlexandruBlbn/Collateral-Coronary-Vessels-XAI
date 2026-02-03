@@ -1,7 +1,7 @@
-experiment_name: "dinov3_swin_v2_tiny"
+experiment_name: "dinov3_vit_small"
 
 model:
-  backbone: "swinv2_tiny_window16_256"  # Options: vit_small_patch16_224, swinv2_tiny_window16_256, convnext_tiny
+  backbone: "vit_small_patch16_224"  # Options: vit_small_patch16_224, swinv2_tiny_window16_256, convnext_tiny
   input_size: 256
   patch_size: 16
   embed_dim: 384 
@@ -9,17 +9,17 @@ model:
   # DINOv3 Head
   projection_dim: 8192
   hidden_dim: 2048
-  bottleneck_dim: 256
-  num_prototypes: 1024
+  bottleneck_dim: 512
+  num_prototypes: 2048
 
   # Pretrained backbone (optional)
   pretrained_backbone: true
-  pretrained_backbone_path: "weights/simmim_pretrain_swin_tiny_v2_patch4_backbone_best.pth"  # e.g. ./checkpoints/simmim_backbone.pth
+  pretrained_backbone_path: "weights/simmim_pretrain_vit_small_patch16_224_backbone_best.pth"  # e.g. ./checkpoints/simmim_backbone.pth
 
   gram_anchoring:
     enabled: true
-    start_epoch: 250  # Start gram anchoring after stabilization
-    lambda_gram: 0.0  # Temporarily disable gram contribution
+    start_epoch: 200  # Start gram anchoring after stabilization
+    lambda_gram: 0.1  # Temporarily disable gram contribution
     update_freq: 10   # Update anchor every N steps
     momentum: 0.995    # EMA momentum for anchor update
 
@@ -37,18 +37,18 @@ optimizer:
   lr: 3e-5
   min_lr: 1e-6
   weight_decay: 0.1
-  weight_decay_end: 0.4
+  weight_decay_end: 0.04
   epochs: 300
-  warmup_epochs: 5 
+  warmup_epochs: 5  # Longer warmup for stability
 
-  gradient_accumulation_steps: 2 # Effective batch = 16 * 1 = 16
+  gradient_accumulation_steps: 2 # Effective batch = 16 * 2 = 32
 
 teacher:
-  momentum_start: 0.98
-  momentum_end: 0.9995
+  momentum_start: 0.996
+  momentum_end: 0.9999
   warmup_teacher_temp: 0.04
-  teacher_temp: 0.004
-  warmup_teacher_temp_epochs: 20
+  teacher_temp: 0.004  # CRITICAL: original DINO uses 0.04-0.07, NOT 0.004!
+  warmup_teacher_temp_epochs: 20  # Slower temperature ramp
 
 student:
   temperature: 0.1
@@ -60,4 +60,4 @@ system:
   use_fp16: true
   gradient_checkpointing: true
   resume: false
-  resume_from: "./checkpoints/dino/dinov3_swin_v2_tiny_checkpoint_last.pth"  # e.g. ./checkpoints/dino/dinov3_swin_v2_tiny_checkpoint_last.pth
+  resume_from: "checkpoints/dino/dinov3_vit_small_checkpoint_last.pth"  # e.g. ./checkpoints/dino/dinov3_swin_v2_tiny_checkpoint_last.pth
