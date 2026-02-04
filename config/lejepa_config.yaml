@@ -1,0 +1,72 @@
+experiment_name: "lejepa_vit_small"
+
+model:
+  backbone: "vit_small_patch16_224"  # Options: vit_small_patch8_224, vit_small_patch16_224, swinv2_tiny_window16_256, convnext_tiny
+  input_size: 256
+  proj_dim: 384  # Projection dimension for SIGReg
+  num_classes: 512  # Embedding dimension from backbone
+  drop_path_rate: 0.1
+  
+  # SIGReg parameters
+  sigreg:
+    knots: 17  # Number of quadrature knots
+    t_max: 3.0  # Maximum t value for ECF integration
+    num_random_features: 512  # Random features for SIGReg
+
+  pretrained_backbone: false
+  pretrained_backbone_path: null  # e.g. ./weights/simmim_pretrain_vit_small_patch16_224_backbone_best.pth
+
+data:
+  batch_size: 32
+  num_workers: 4
+  in_channels: 1
+  image_size: 256  
+  num_views: 2
+  
+  # Augmentation parameters
+  crop_scale: [0.08, 1.0]
+  color_jitter_prob: 0.8
+  color_jitter_params: [0.8, 0.8, 0.8, 0.2]  # brightness, contrast, saturation, hue
+  grayscale_prob: 0
+  gaussian_blur_prob: 0.2
+  gaussian_blur_sigma: [0.1, 0.5]
+  solarize_prob: 0
+  solarize_threshold: 128
+
+optimizer:
+  lr: 0.002  # 2e-3
+  min_lr: 0.0003  # 1e-4
+  weight_decay: 0.08
+  epochs: 300
+  warmup_epochs: 10  # Linear warmup for stability
+  
+  # LeJepa specific
+  lamb: 0.04  # λ parameter for balancing SIGReg and Invariance loss
+  
+
+  probe_lr: 0.001  # 1e-3
+  probe_weight_decay: 0.0000001  # 1e-7
+
+  gradient_accumulation_steps: 1  # Effective batch = batch_size * gradient_accumulation_steps
+  gradient_clip: 1.0  # Gradient clipping value (null to disable)
+
+system:
+  device: "cuda"
+  seed: 42
+  save_dir: "/workspace/Collateral-Coronary-Vessels-XAI/checkpoints/lejepa/"
+  use_fp16: true  
+  use_amp: true  
+  resume: false
+  resume_from: null  # e.g. ./checkpoints/lejepa/lejepa_vit_small_checkpoint_last.pth
+  
+  # Logging and evaluation
+  log_interval: 50  # Log every N steps
+  save_interval: 10  # Save checkpoint every N epochs
+  eval_interval: 1  # Run evaluation every N epochs
+  num_attention_samples: 8  # Number of samples for attention visualization
+
+# Linear probe for online evaluation (optional)
+probe:
+  enabled: true  # Enable online linear probing during training
+  num_classes: 2  # Binary classification (stenosis vs normal)
+  hidden_dim: 512  # Hidden dimension for probe

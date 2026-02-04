@@ -6,6 +6,7 @@ model:
   patch_size: 16
   embed_dim: 384 
   
+
   # DINOv3 Head
   projection_dim: 8192
   hidden_dim: 2048
@@ -14,7 +15,7 @@ model:
 
   # Pretrained backbone (optional)
   pretrained_backbone: true
-  pretrained_backbone_path: "weights/simmim_pretrain_vit_small_patch16_224_backbone_best.pth"  # e.g. ./checkpoints/simmim_backbone.pth
+  pretrained_backbone_path: "/workspace/Collateral-Coronary-Vessels-XAI/weights/simmim_pretrain_vit_small_patch16_224_backbone_best.pth"  # e.g. ./checkpoints/simmim_backbone.pth
 
   gram_anchoring:
     enabled: true
@@ -36,7 +37,7 @@ data:
 optimizer:
   lr: 3e-5
   min_lr: 1e-6
-  weight_decay: 0.1
+  weight_decay: 1e-6
   weight_decay_end: 0.04
   epochs: 300
   warmup_epochs: 5  # Longer warmup for stability
@@ -56,8 +57,8 @@ student:
 system:
   device: "cuda"
   seed: 42
-  save_dir: "./checkpoints/dino/"
+  save_dir: "/workspace/Collateral-Coronary-Vessels-XAI/checkpoints/dino/"
   use_fp16: true
   gradient_checkpointing: true
   resume: false
-  resume_from: "checkpoints/dino/dinov3_vit_small_checkpoint_last.pth"  # e.g. ./checkpoints/dino/dinov3_swin_v2_tiny_checkpoint_last.pth
+  resume_from: "/workspace/Collateral-Coronary-Vessels-XAI/checkpoints/dinov3_vit_small_backbone_last.pth"  # e.g. ./checkpoints/dino/dinov3_swin_v2_tiny_checkpoint_last.pth
