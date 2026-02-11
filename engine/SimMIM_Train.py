@@ -5,6 +5,7 @@ import yaml
 import torch
 import torch.optim as optim
 import torchvision
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import torchvision.transforms as transforms
@@ -22,7 +23,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, scaler)
         images = images.to(device)
         masks = masks.to(device)
         optimizer.zero_grad()
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=(device.type == 'cuda')):
+        with torch.amp.autocast('cuda', dtype=torch.float16):
             outputs = model(images, masks)
             reconstruction = None
             if isinstance(outputs, tuple):
@@ -39,18 +40,23 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, scaler)
         progress_bar.set_postfix({"loss": loss.item()})
         global_step = epoch * len(dataloader) + step
         logger.log_scalar("Train/Step_Loss", loss.item(), global_step)
+        
         if step == 0:
             with torch.no_grad():
                 n_vis = 8
                 vis_images = images[:n_vis]
                 vis_masks = masks[:n_vis].unsqueeze(1).float()
+                
+                if vis_masks.shape[-2:] != vis_images.shape[-2:]:
+                    vis_masks = F.interpolate(vis_masks, size=vis_images.shape[-2:], mode='nearest')
+                
                 vis_masked_images = vis_images * (1 - vis_masks)
                 
                 if reconstruction is not None:
-                    vis_reconstruction = reconstruction[:n_vis]
-                    # Stack to interleave: (N, 3, C, H, W) -> (N*3, C, H, W)
-                    combined = torch.stack([vis_images, vis_masked_images, vis_reconstruction], dim=1).flatten(0, 1)
-                    # nrow=3 ensures each row contains (Original, Masked, Reconstruction)
+                    vis_raw_rec = reconstruction[:n_vis]
+                    vis_final_rec = (vis_images * (1 - vis_masks)) + (vis_raw_rec * vis_masks)
+                    
+                    combined = torch.stack([vis_images, vis_masked_images, vis_final_rec], dim=1).flatten(0, 1)
                     grid = torchvision.utils.make_grid(combined, nrow=3, normalize=True, padding=2)
                     logger.log_image("Train/Visualizations", grid, global_step)
 
@@ -65,6 +71,7 @@ def main():
 
     with open(config_path, "r") as f:
         base_config = yaml.safe_load(f)
+
     backbones = [
         "swinv2_tiny_window16_256",
         "convnext_tiny",
@@ -73,21 +80,27 @@ def main():
 
     device = torch.device(base_config["system"]["device"] if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
     for backbone_name in backbones:
         print(f"\n{'='*50}")
         print(f"Backbone: {backbone_name}")
         print(f"{'='*50}\n")
+        
         config = base_config.copy()
         config["model"]["backbone"] = backbone_name
         config["experiment_name"] = f"simmim_pretrain_{backbone_name}"
+        
         logger = TensorboardLogger(log_dir="runs", experiment_name=config["experiment_name"])
+        
         transform_list = [transforms.Resize((config["model"]["input_size"], config["model"]["input_size"]))]
         transform_list.append(transforms.Grayscale(num_output_channels=1))
         transform_list.append(transforms.ToTensor())
         transform_list.append(transforms.Normalize(mean=[0.5], std=[0.5]))
         transform = transforms.Compose(transform_list)
+        
         json_path = "/workspace/Collateral-Coronary-Vessels-XAI/data/ARCADE/processed/dataset.json"
         root_dir = "/workspace/Collateral-Coronary-Vessels-XAI"
+        
         dataset = ArcadeDataset(json_path=json_path, split='train', transform=transform, mode='pretrain', root_dir=root_dir)
         
         mask_generator = MaskGenerator(
@@ -95,7 +108,9 @@ def main():
             mask_patch_size=config["data"]["mask_patch_size"],
             mask_ratio=config["data"]["mask_ratio"]
         )
+        
         mim_dataset = ArcadeDatasetMIM(dataset, mask_generator)
+        
         dataloader = DataLoader(
             mim_dataset,
             batch_size=config["data"]["batch_size"],
@@ -103,9 +118,11 @@ def main():
             num_workers=config["data"]["num_workers"],
             pin_memory=True
         )
+        
         model = SimMIM(backbone_name=backbone_name, in_channels=config["data"]["in_channels"]).to(device)
         optimizer = optim.AdamW(model.parameters(), lr=float(config["optimizer"]["lr"]), weight_decay=config["optimizer"]["weight_decay"])
         scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
+        
         epochs = config["optimizer"]["epochs"]
         save_dir = os.path.join(config["system"]["save_dir"], config["experiment_name"])
         os.makedirs(save_dir, exist_ok=True)
@@ -125,10 +142,8 @@ def main():
                 'config': config
             }
             
-            # Save last model
             torch.save(checkpoint, os.path.join(save_dir, "last_model.pth"))
             
-            # Save best model
             if train_loss < best_loss:
                 best_loss = train_loss
                 torch.save(checkpoint, os.path.join(save_dir, "best_model.pth"))

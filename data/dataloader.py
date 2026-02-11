@@ -6,6 +6,7 @@ import os
 from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
+import cv2
 
 
 class ArcadeDataset(Dataset):
@@ -47,6 +48,16 @@ class ArcadeDataset(Dataset):
         if self.root_dir:
             img_path = os.path.join(self.root_dir, img_path)
         image = Image.open(img_path).convert('RGB')
+
+        # Apply CLAHE
+        img_np = np.array(image)
+        lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge((l, a, b))
+        image = Image.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB))
+
         if self.transform:
             image = self.transform(image)
 
@@ -55,4 +66,3 @@ class ArcadeDataset(Dataset):
             return image, label
 
         return image
-
