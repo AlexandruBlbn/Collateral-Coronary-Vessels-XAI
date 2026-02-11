@@ -243,18 +243,115 @@ class ARCADEDataset(Dataset):
             potential_samples = []
             
             if task == 'SegStenoza':
-                for patient_id, pacienti in self.data[split]['stenoza'].items():
-                    potential_samples.append((pacienti['data'], pacienti['label']))
-            elif task == 'SegCoronare':
-                for patient_id, pacienti in self.data[split]['segmentare'].items():
-                    potential_samples.append((pacienti['data'], pacienti['label']))
-            elif task == 'Clasificare':
+                # 1. Original Stenoza (Positives with masks)
                 if 'stenoza' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['stenoza'].items():
+                        potential_samples.append((pacienti['data'], pacienti['label']))
+                
+                # 2. DataValidation (Negatives only - generate empty masks)
+                if 'DataValidation' in self.data:
+                    dataval = self.data['DataValidation']
+                    negative_samples = []
+                    for key, item in dataval.items():
+                        if key.startswith('negative_'):
+                            negative_samples.append(item['data'])
+                    
+                    # Split logic (consistent with Clasificare task)
+                    num_neg = len(negative_samples)
+                    train_neg_count = int(num_neg * 0.60)
+                    val_neg_count = int(num_neg * 0.20)
+                    extra_neg = 6 
+                    
+                    if split == 'train':
+                        for img_path in negative_samples[:train_neg_count]:
+                            potential_samples.append((img_path, None)) # None = Empty Mask
+                    elif split == 'validation':
+                        val_end_neg = train_neg_count + val_neg_count + extra_neg
+                        for img_path in negative_samples[train_neg_count:val_end_neg]:
+                            potential_samples.append((img_path, None))
+                    elif split == 'test':
+                        val_end_neg = train_neg_count + val_neg_count + extra_neg
+                        for img_path in negative_samples[val_end_neg:]:
+                            potential_samples.append((img_path, None))
+
+            elif task == 'SegCoronare':
+                if 'syntax' in self.data[split]:
+                    for patient_id, pacienti in self.data[split]['syntax'].items():
+                        potential_samples.append((pacienti['data'], pacienti['label']))
+            elif task == 'Clasificare':
+                # Toggle this to False if you want to train ONLY on the new DataValidation data
+                use_original_data = True
+                # DISABLE Extra data to fix domain shift (High Train Acc, 0 Val Specificity)
+                use_extra_data = False
+
+                # Stenoza = 1 (positive class)
+                if use_original_data and 'stenoza' in self.data[split]:
+                    for patient_id, pacienti in self.data[split]['stenoza'].items():
                         potential_samples.append((pacienti['data'], 1))
-                if 'segmentare' in self.data[split]:
-                    for patient_id, pacienti in self.data[split]['segmentare'].items():
-                        potential_samples.append((pacienti['data'], 0))      
+                
+                # Extra/Normal images = 0 (negative class) - USE ALL for training
+                if use_original_data and use_extra_data and split == 'train':
+                    if 'extra' in self.data and 'pretrain' in self.data['extra']:
+                        for _, item in self.data['extra']['pretrain'].items():
+                            potential_samples.append((item['data'], 0))
+                
+                # DataValidation data distribution: 60% train, 20% val (+20 from test), 20% test (-20)
+                if 'DataValidation' in self.data:
+                    dataval = self.data['DataValidation']
+                    
+                    # Separate positive and negative samples by checking key prefixes
+                    positive_samples = []
+                    negative_samples = []
+                    
+                    for key, item in dataval.items():
+                        if key.startswith('positive_'):
+                            positive_samples.append(item['data'])
+                        elif key.startswith('negative_'):
+                            negative_samples.append(item['data'])
+                    
+                    # Calculate split sizes maintaining the positive/negative ratio
+                    num_pos = len(positive_samples)
+                    num_neg = len(negative_samples)
+                    
+                    # 60/20/20 split
+                    train_pos_count = int(num_pos * 0.60)
+                    val_pos_count = int(num_pos * 0.20)
+                    test_pos_count = num_pos - train_pos_count - val_pos_count  # remaining ~20%
+                    
+                    train_neg_count = int(num_neg * 0.60)
+                    val_neg_count = int(num_neg * 0.20)
+                    test_neg_count = num_neg - train_neg_count - val_neg_count  # remaining ~20%
+                    
+                    # Add 20 extra samples from test to val (14 pos + 6 neg to maintain ratio)
+                    extra_pos = 14
+                    extra_neg = 6
+                    
+                    if split == 'train':
+                        # First 60% of positives and negatives
+                        for img_path in positive_samples[:train_pos_count]:
+                            potential_samples.append((img_path, 1))
+                        for img_path in negative_samples[:train_neg_count]:
+                            potential_samples.append((img_path, 0))
+                    
+                    elif split == 'validation':
+                        # 20% + 20 extra from test (14 pos + 6 neg)
+                        val_end_pos = train_pos_count + val_pos_count + extra_pos
+                        val_end_neg = train_neg_count + val_neg_count + extra_neg
+                        
+                        for img_path in positive_samples[train_pos_count:val_end_pos]:
+                            potential_samples.append((img_path, 1))
+                        for img_path in negative_samples[train_neg_count:val_end_neg]:
+                            potential_samples.append((img_path, 0))
+                    
+                    elif split == 'test':
+                        # Remaining 20% minus the 20 moved to validation
+                        test_start_pos = train_pos_count + val_pos_count + extra_pos
+                        test_start_neg = train_neg_count + val_neg_count + extra_neg
+                        
+                        for img_path in positive_samples[test_start_pos:]:
+                            potential_samples.append((img_path, 1))
+                        for img_path in negative_samples[test_start_neg:]:
+                            potential_samples.append((img_path, 0))      
             elif task == 'Unsupervised':
                 if 'stenoza' in self.data[split]:
                     for patient_id, pacienti in self.data[split]['stenoza'].items():
@@ -288,6 +385,12 @@ class ARCADEDataset(Dataset):
                 print(f"Warning: {missing_count} samples were missing and removed from the dataset.")
                 if len(missing_dirs) < 5:
                     print(f"Missing directories: {list(missing_dirs)}")
+
+            # Print Class Distribution for Classification
+            if self.task == 'Clasificare':
+                pos_count = sum(1 for _, label in self.samples if label == 1)
+                neg_count = sum(1 for _, label in self.samples if label == 0)
+                print(f"Dataset Split: {split.upper()} | Total: {len(self.samples)} | Pos (Stenoza): {pos_count} | Neg (Normal): {neg_count}")
 
     def __len__(self):
             return len(self.samples)
@@ -357,15 +460,38 @@ class ARCADEDataset(Dataset):
     
     def __getitem__(self, idx):
             samples = self.samples[idx]
-            # Resolve path (handles both absolute and relative paths)
             image_path = self._resolve_path(samples[0])
-            # OpenCV este mult mai rapid decat PIL pentru citire si resize
             image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if image is None: raise FileNotFoundError(image_path)
             image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_LINEAR)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            image = clahe.apply(image)
             image = image.astype(np.float32) / 255.0
             
             if self.task == 'SegStenoza':
+                if samples[1] is None:
+                    # Negative sample -> Empty mask (Black)
+                    label = np.zeros((256, 256), dtype=np.float32)
+                else:
+                    label_path = self._resolve_path(samples[1])
+                    label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
+                    label = cv2.resize(label, (256, 256), interpolation=cv2.INTER_NEAREST)
+                    label = np.array(label, dtype=np.float32)
+                    label = label / 255.0
+                    label = (label > 0.5).astype(np.float32)
+                
+                if self.transform:
+                    augmented = self.transform(image=image, mask=label)
+                    image = augmented['image']
+                    label = augmented['mask']
+                
+                image = zscore_normalize_image(image)
+                image = torch.tensor(image).unsqueeze(0) 
+                label = torch.tensor(label).unsqueeze(0) 
+                
+                return image, label
+            
+            elif self.task == 'SegCoronare':
                 label_path = self._resolve_path(samples[1])
                 label = cv2.imread(label_path, cv2.IMREAD_GRAYSCALE)
                 label = cv2.resize(label, (256, 256), interpolation=cv2.INTER_NEAREST)
@@ -378,24 +504,7 @@ class ARCADEDataset(Dataset):
                     image = augmented['image']
                     label = augmented['mask']
                 
-                image = torch.tensor(image).unsqueeze(0) 
-                label = torch.tensor(label).unsqueeze(0) 
-                
-                return image, label
-            
-            elif self.task == 'SegCoronare':
-                label_path = os.path.join("data/ARCADE/", samples[1])
-                label = Image.open(label_path).convert('L')
-                label = label.resize((256, 256), Image.NEAREST)
-                label = np.array(label, dtype=np.float32)
-                label = label / 255.0
-                label = (label > 0.5).astype(np.float32)
-                
-                if self.transform:
-                    augmented = self.transform(image=image, mask=label)
-                    image = augmented['image']
-                    label = augmented['mask']
-                
+                image = zscore_normalize_image(image)
                 image = torch.tensor(image).unsqueeze(0) 
                 label = torch.tensor(label).unsqueeze(0) 
                 
@@ -408,6 +517,7 @@ class ARCADEDataset(Dataset):
                     augmented = self.transform(image=image)
                     image = augmented['image']
                 
+                image = zscore_normalize_image(image)
                 image = torch.tensor(image).unsqueeze(0) 
                 label = torch.tensor(label, dtype=torch.long)
                 
@@ -418,6 +528,7 @@ class ARCADEDataset(Dataset):
                     augmented = self.transform(image=image)
                     image = augmented['image']
                 
+                image = zscore_normalize_image(image)
                 image = torch.tensor(image).unsqueeze(0) 
                 
                 return image

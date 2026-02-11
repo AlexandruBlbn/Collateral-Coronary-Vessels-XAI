@@ -1,52 +1,30 @@
-# from utils.helpers import set_seed
-# from utils.zoo import UNet
-# import torch
-# from torch.utils.data import DataLoader
-# import torch.nn as nn
-# from data.ARCADE.dataloader import ARCADEDataset
-# from tqdm import tqdm
-# from utils.metrics import dice_coefficient, iou, DiceLoss
-# import matplotlib.pyplot as plt
-# import numpy as np
-# from torch.amp import autocast, GradScaler
-# import torch.backends.cudnn as cudnn
-# import os
+import json
 
-# set_seed(42)
+with open('data/ARCADE/processed/dataset.json', 'r') as f:
+    data = json.load(f)
 
-# dataset_path = 'data/ARCADE/processed/dataset.json'
+# Count DataValidation samples
+dataval = data['DataValidation']
+positive_samples = []
+negative_samples = []
 
-# '''
-# taskuri:
-# SegStenoza
-# SegCoronare
-# Clasificare
-# Unsupervised
-# '''
+for key, item in dataval.items():
+    if key.startswith('positive_'):
+        positive_samples.append(item['data'])
+    elif key.startswith('negative_'):
+        negative_samples.append(item['data'])
 
-# train_dataset = ARCADEDataset(dataset_path, split='train', task='SegCoronare')
-# val_dataset = ARCADEDataset(dataset_path, split='test', task='SegCoronare')
-# test_dataset = ARCADEDataset(dataset_path, split='test', task='SegCoronare')
+num_pos = len(positive_samples)
+num_neg = len(negative_samples)
 
-# train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=0, pin_memory=True)
-# val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0, pin_memory=True)
-# test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=0, pin_memory=True)
+train_pos_count = int(num_pos * 0.10)
+train_neg_count = int(num_neg * 0.10)
 
-
-import sys
-import os
-import torch
-import yaml
-from torch.utils.data import DataLoader
-
-# Setup Paths
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
-
-from data.ARCADE.MIM import MaskGenerator, ArcadeDatasetMIM
-from data.ARCADE.dataloader import ARCADEDataset
-
-# --- INSEREAZĂ FUNCȚIA inspect_input_data AICI ---
-# (Copiază codul funcției de mai sus)
-
+print(f"DataValidation total: {num_pos} positives, {num_neg} negatives")
+print(f"\nTraining set composition:")
+print(f"  - Stenoza train: 1000 (class 1)")
+print(f"  - Extra/pretrain: {len(data['extra']['pretrain'])} (class 0)")
+print(f"  - DataValidation 10%: {train_pos_count} positives (class 1), {train_neg_count} negatives (class 0)")
+print(f"\n  Total class 1: {1000 + train_pos_count}")
+print(f"  Total class 0: {len(data['extra']['pretrain']) + train_neg_count}")
+print(f"  Ratio class0/class1: {(len(data['extra']['pretrain']) + train_neg_count) / (1000 + train_pos_count):.2f}")
