@@ -1,46 +1,29 @@
-import math
-import torch
-import torch.distributed as dist
-import torch.nn.functional as F
-from torch import nn
-
-class DINOLoss(nn.Module):
-    def __init__(
-        self,
-        out_dim,
-        student_temp=0.1,
-        center_momentum=0.9,
-    ):
-        super().__init__()
-        self.student_temp = student_temp
-        self.center_momentum = center_momentum
-        self.register_buffer("center", torch.zeros(1, out_dim))
-        self.updated = True
+def compute_loss(self, inputs, masks, epoch):
+        # Forward Pass
+        s_cls, s_patch, t_cls, t_patch = self.forward(inputs)
         
-    @torch.no_grad()
-    def softmax_center_teacher(self, teacher_output, teacher_temp):
-        self.apply_center_update(teacher_output)
-        return F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
-
-    def forward(self, student_output, teacher_output, epoch):
-
-        teacher_temp = 0.04 + (0.07 - 0.04) * (epoch / 100)
+        # 1. DINO Loss (CLS) - Global Crops Only (Primele 2)
+        loss_dino = (self.dino_loss(s_cls[0], t_cls[1], epoch) + 
+                     self.dino_loss(s_cls[1], t_cls[0], epoch)) / 2
         
-        teacher_probs = self.softmax_center_teacher(teacher_output, teacher_temp)
-        student_logits = F.log_softmax(student_output / self.student_temp, dim=-1)
+        # 2. iBOT Loss (Patch) - Global Crops Only
+        # masks vine din DataLoader (o listă de măști pentru fiecare crop global)
+        loss_ibot = 0
+        if masks is not None:
+             # Comparăm patch-urile Global 1 Student cu Global 1 Teacher (dar mascat)
+             # Atenție: La iBOT comparăm aceleași vederi, studentul are mască, teacherul vede tot.
+             l1 = self.ibot_loss(s_patch[0], t_patch[0], masks[0], epoch)
+             l2 = self.ibot_loss(s_patch[1], t_patch[1], masks[1], epoch)
+             loss_ibot = (l1 + l2) / 2
+
+        # 3. Gram Loss - Încrucișat (Student 1 <-> Teacher 2)
+        # Se aplică pe patch tokens NE-mascați (sau toți, dar DINOv3 preferă global structure)
+        loss_gram = (self.gram_loss(s_patch[0], t_patch[1]) + 
+                     self.gram_loss(s_patch[1], t_patch[0])) / 2
         
-        # Cross Entropy: -Sum(P_teacher * log(P_student))
-        loss = torch.sum(-teacher_probs * student_logits, dim=-1).mean()
-        return loss
-
-    @torch.no_grad()
-    def apply_center_update(self, teacher_output):
-        # Update center with EMA
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        if dist.is_initialized():
-            dist.all_reduce(batch_center)
-            batch_center = batch_center / dist.get_world_size()
-        batch_center = batch_center / len(teacher_output)
-
-        # EMA update
-        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+        # 4. KoLeo (Regularizare)
+        loss_koleo = self.koleo_loss(s_cls[0])
+        
+        # Total Ponderat (Valori tipice DINOv3 config)
+        # Gram Loss are de obicei un weight mic la început și crește, sau fix
+        return loss_dino + 0.5 * loss_ibot + 0.1 * loss_koleo + 0.1 * loss_gram
