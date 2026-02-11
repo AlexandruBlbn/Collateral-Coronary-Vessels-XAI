@@ -1,0 +1,44 @@
+experiment_name: "dino_pretrain_swinv2_tiny_window16_256"
+
+model:
+  backbone: "swinv2_tiny_window16_256"
+  input_size: 256
+  feature_dim: 768
+  head_dim: 65536
+  head_hidden_dim: 2048
+  head_bottleneck_dim: 256
+
+data:
+  batch_size: 32
+  num_workers: 4
+  in_channels: 1
+  n_global_crops: 2
+  n_local_crops: 4
+  global_scale_min: 0.4
+  global_scale_max: 1.0
+  local_scale_min: 0.05
+  local_scale_max: 0.4
+
+optimizer:
+  lr: 5e-4
+  final_lr: 1e-6
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  warmup_epochs: 10
+  epochs: 300
+
+dino:
+  student_temp: 0.1
+  teacher_temp: 0.07
+  teacher_warmup_temp: 0.04
+  teacher_temp_warmup_epochs: 30
+  ema_momentum: 0.996
+  center_momentum: 0.9
+  koleo_weight: 0.1
+  clip_grad: 3.0
+
+system:
+  device: "cuda"
+  seed: 42
+  save_dir: "./checkpoints/dino/"
+  gradient_checkpointing: false

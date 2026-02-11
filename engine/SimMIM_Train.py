@@ -73,8 +73,6 @@ def main():
         base_config = yaml.safe_load(f)
 
     backbones = [
-        "swinv2_tiny_window16_256",
-        "convnext_tiny",
         "vit_small_patch16_224"
     ]
 
@@ -134,25 +132,12 @@ def main():
             logger.log_scalar("Train/Epoch_Loss", train_loss, epoch)
             print(f"Backbone: {backbone_name} | Epoch {epoch+1}/{epochs} | Loss: {train_loss:.4f}")
             
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': train_loss,
-                'config': config
-            }
-            
-            torch.save(checkpoint, os.path.join(save_dir, "last_model.pth"))
+            torch.save(model.encoder.state_dict(), os.path.join(save_dir, "last_backbone.pth"))
             
             if train_loss < best_loss:
                 best_loss = train_loss
-                torch.save(checkpoint, os.path.join(save_dir, "best_model.pth"))
-                print(f"New best model saved with loss: {best_loss:.4f}")
-            
-            if (epoch + 1) % 10 == 0 or (epoch + 1) == epochs:
-                ckpt_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch+1}.pth")
-                torch.save(checkpoint, ckpt_path)
-                print(f"Saved checkpoint: {ckpt_path}")
+                torch.save(model.encoder.state_dict(), os.path.join(save_dir, "best_backbone.pth"))
+                print(f"New best backbone saved with loss: {best_loss:.4f}")
 
         logger.close()
         print(f"Finished training for {backbone_name}")

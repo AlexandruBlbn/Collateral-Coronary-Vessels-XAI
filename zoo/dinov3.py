@@ -30,12 +30,12 @@ class DINOv3Wrapper(nn.Module):
             p.requires_grad = False
         self.dino_loss = DINOLoss(out_dim=head_dim)
         self.koleo_loss = KoLeoLoss()
-        self.ibot_loss = iBOTPatchLoss()
+        self.ibot_loss = iBOTPatchLoss(patch_out_dim=head_dim)
 
     def forward(self, inputs):
         student_cls_tokens = []
         for img in inputs:
-            feat = self.student_backbone(img) # (B, feature_dim)
+            feat = self.student_backbone(img) 
             student_cls_tokens.append(feat)
             
         student_cls = torch.cat(student_cls_tokens) 
