@@ -73,7 +73,9 @@ def main():
         base_config = yaml.safe_load(f)
 
     backbones = [
-        "vit_small_patch16_224"
+        "vit_small_patch16_224",
+        "convnext_tiny",
+        "swinv2_tiny_window16_256"
     ]
 
     device = torch.device(base_config["system"]["device"] if torch.cuda.is_available() else "cpu")
