@@ -78,7 +78,7 @@ class ArcadeDataset(Dataset):
         if self.root_dir:
             img_path = os.path.join(self.root_dir, img_path)
         
-        image = Image.open(img_path).convert('RGB')
+        image = Image.open(img_path).convert('L')
 
         if self.transform:
             image = self.transform(image)

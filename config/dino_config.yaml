@@ -1,44 +1,53 @@
-experiment_name: "dino_pretrain_swinv2_tiny_window16_256"
+experiment_name: "dino_pretrain_vit_small_patch16_224"
 
 model:
-  backbone: "swinv2_tiny_window16_256"
+  backbone: "vit_small_patch16_224"
+  teacher_backbone_path: "checkpoints/mim/simmim_pretrain_vit_small_patch16_224/best_backbone.pth"
   input_size: 256
-  feature_dim: 768
-  head_dim: 65536
-  head_hidden_dim: 2048
+  feature_dim: 384
+  
+  head_dim: 4096
+  head_hidden_dim: 1024
   head_bottleneck_dim: 256
 
 data:
-  batch_size: 32
+  batch_size: 16
+  desired_batch_size: 64
   num_workers: 4
   in_channels: 1
   n_global_crops: 2
-  n_local_crops: 4
+  n_local_crops: 6
   global_scale_min: 0.4
-  global_scale_max: 1.0
-  local_scale_min: 0.05
+  global_scale_max: 0.9
+  local_scale_min: 0.2
   local_scale_max: 0.4
 
 optimizer:
-  lr: 5e-4
+  lr: 3e-5
   final_lr: 1e-6
-  weight_decay: 0.04
+  weight_decay: 0.1
   weight_decay_end: 0.4
   warmup_epochs: 10
   epochs: 300
+  patience: 30
 
 dino:
   student_temp: 0.1
-  teacher_temp: 0.07
-  teacher_warmup_temp: 0.04
-  teacher_temp_warmup_epochs: 30
+  teacher_temp: 0.02
+  teacher_warmup_temp: 0.05
+  teacher_temp_warmup_epochs: 10
   ema_momentum: 0.996
-  center_momentum: 0.9
+  center_momentum: 0.999
   koleo_weight: 0.1
-  clip_grad: 3.0
+  clip_grad: 1.0
+
+  # --- GRAM ANCHORING SETTINGS ---
+  gram_start_epoch: 200      # Pornim Gram abia după ce modelul se stabilizează (Epoch 50)
+  lambda_gram: 0.2         # Ponderea loss-ului
+  gram_momentum: 0.99       # Momentum pentru ancora (istoricul Gram)
 
 system:
   device: "cuda"
   seed: 42
   save_dir: "./checkpoints/dino/"
-  gradient_checkpointing: false
+  gradient_checkpointing: true

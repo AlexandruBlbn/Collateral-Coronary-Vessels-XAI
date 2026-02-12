@@ -1,335 +1,242 @@
+import os
+import sys
+import yaml
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 from tqdm import tqdm
-import os
 from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
 
-# Project imports
+# Setăm backend-ul pentru server (fără GUI)
+plt.switch_backend('Agg')
+
+# Adăugăm path-ul root
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
+
 from zoo.backbones import get_backbone
 from data.dataloader import ArcadeDataset
-
+from utils.metrics import dice_coefficient
 
 class LinearProbeLeJEPA(nn.Module):
-    def __init__(self, backbone, img_size=256, patch_size=16, embed_dim=768, num_classes=1):
+    def __init__(self, backbone, in_channels, num_classes=1):
         super().__init__()
-        
-        # 1. Backbone-ul LeJEPA (Encoderul)
         self.backbone = backbone
-        self.patch_size = patch_size
-        self.img_size = img_size
         
-        # Calculăm dimensiunea grid-ului de patch-uri (ex: 224/16 = 14x14)
-        self.grid_size = img_size // patch_size
-        
-        # 2. ÎNGHEȚARE (Esențial pentru Linear Probing)
+        # 1. ÎNGHEȚARE BACKBONE
         for param in self.backbone.parameters():
             param.requires_grad = False
             
-        # 3. Capul Liniar (Sonda)
-        # Transformă vectorul latent (ex: 768) în logits (1 clasă)
-        # Folosim Conv2d(1x1) care este echivalent matematic cu un Linear layer aplicat spațial
-        self.head = nn.Conv2d(embed_dim, num_classes, kernel_size=1)
-        
-        # Inițializare standard pentru cap
-        nn.init.normal_(self.head.weight, std=0.01)
-        nn.init.constant_(self.head.bias, 0)
-
-    def forward(self, x):
-        # x: (Batch, 3, 224, 224)
-        
-        # 1. Extragem Feature-urile din Backbone
+        # 2. Determinare Dimensiuni
         with torch.no_grad():
-            # LeJEPA (ViT) returnează de obicei (Batch, N_patches, Dim)
-            # Verifică dacă backbone-ul tău are o funcție forward_encoder sau doar forward
-            if hasattr(self.backbone, 'forward_encoder'):
-                features = self.backbone.forward_encoder(x)
-            else:
-                features = self.backbone(x)
-                
-            # Dacă output-ul este un dicționar sau tuplu, extragem doar tensorul
-            if isinstance(features, (tuple, list)):
-                features = features[0]
-            
-            # Eliminăm CLS token dacă există (ViT standard are CLS pe poz 0)
-            # Dacă LeJEPA tău nu are CLS token, comentează linia asta.
-            if features.shape[1] == (self.grid_size ** 2) + 1:
-                features = features[:, 1:, :]
-                
-            # 2. Reshape din secvență în imagine 2D
-            # (B, N, D) -> (B, D, H_grid, W_grid)
-            B, N, D = features.shape
-            H_grid = W_grid = int(N ** 0.5) # ar trebui să fie 14
-            
-            features = features.transpose(1, 2) # (B, D, N)
-            features = features.view(B, D, H_grid, W_grid)
+            dummy = torch.randn(1, 1, 256, 256)
+            feats = self.backbone(dummy)
+            self.embed_dim = feats.shape[1]
+            print(f"Detected backbone feature dim: {self.embed_dim}")
 
-        # 3. Aplicăm Sonda Liniară
-        # (B, 768, 14, 14) -> (B, 1, 14, 14)
+        # 3. Capul Liniar
+        self.head = nn.Conv2d(self.embed_dim, num_classes, kernel_size=1)
+        
+    def forward(self, x):
+        with torch.no_grad():
+            features = self.backbone(x)
+        
         logits = self.head(features)
         
-        # 4. Upsampling la rezoluția originală
-        # De la 14x14 înapoi la 224x224
-        masks = F.interpolate(logits, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
-        
-        return masks
+        output = torch.nn.functional.interpolate(
+            logits, size=(x.shape[2], x.shape[3]), mode='bilinear', align_corners=False
+        )
+        return output
 
+def visualize_results(model, loader, device, epoch, save_dir, n_samples=4):
+    """Salvează un grid cu predicții pentru inspectare vizuală."""
+    model.eval()
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Luăm un singur batch
+    imgs, masks = next(iter(loader))
+    imgs = imgs.to(device)
+    
+    with torch.no_grad():
+        preds_logits = model(imgs)
+        preds_probs = torch.sigmoid(preds_logits)
+    
+    # Mutăm pe CPU
+    imgs = imgs.cpu()
+    masks = masks.cpu()
+    preds_probs = preds_probs.cpu()
+    
+    # Plotare
+    fig, axes = plt.subplots(n_samples, 4, figsize=(15, 4 * n_samples))
+    plt.subplots_adjust(wspace=0.1, hspace=0.1)
+    
+    for i in range(min(n_samples, len(imgs))):
+        # 1. Imagine Originală (Denormalizare: x * 0.5 + 0.5)
+        img_show = imgs[i].permute(1, 2, 0).numpy() * 0.5 + 0.5
+        img_show = np.clip(img_show, 0, 1)
+        
+        # 2. Masca Reală
+        mask_show = masks[i].permute(1, 2, 0).numpy()
+        
+        # 3. Predicție (Heatmap)
+        pred_show = preds_probs[i].permute(1, 2, 0).numpy()
+        
+        # 4. Overlay (Predicție binară peste imagine)
+        pred_binary = (pred_show > 0.5).astype(np.float32)
+        overlay = img_show.copy()
+        # Punem roșu unde e vas
+        if img_show.shape[2] == 1: # Dacă e grayscale, facem RGB
+            overlay = np.repeat(overlay, 3, axis=2)
+            
+        # Colorăm cu roșu pixelii prezisi (canalul R + 0.5)
+        overlay[:, :, 0] = np.where(pred_binary[:, :, 0] == 1, 1.0, overlay[:, :, 0])
+
+        # Afișare pe rând
+        ax_row = axes[i] if n_samples > 1 else axes
+        
+        ax_row[0].imshow(img_show, cmap='gray' if img_show.shape[2]==1 else None)
+        ax_row[0].set_title("Input")
+        ax_row[0].axis('off')
+        
+        ax_row[1].imshow(mask_show, cmap='gray')
+        ax_row[1].set_title("Ground Truth")
+        ax_row[1].axis('off')
+        
+        ax_row[2].imshow(pred_show, cmap='jet', vmin=0, vmax=1)
+        ax_row[2].set_title("Prediction (Prob)")
+        ax_row[2].axis('off')
+        
+        ax_row[3].imshow(overlay)
+        ax_row[3].set_title("Overlay (Pred > 0.5)")
+        ax_row[3].axis('off')
+        
+    save_path = os.path.join(save_dir, f"epoch_{epoch}_vis.png")
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close()
+    print(f"Saved visualization to {save_path}")
+
+def train_one_epoch(model, loader, optimizer, criterion, device):
+    model.train()
+    model.backbone.eval() 
+    total_loss, total_dice = 0, 0
+    
+    for imgs, targets in tqdm(loader, desc="Training"):
+        imgs = imgs.to(device)
+        targets = targets.to(device).float()
+        if targets.dim() == 3: targets = targets.unsqueeze(1)
+            
+        optimizer.zero_grad()
+        preds = model(imgs)
+        loss = criterion(preds, targets)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        with torch.no_grad():
+            total_dice += dice_coefficient(torch.sigmoid(preds), targets).item()
+            
+    return total_loss / len(loader), total_dice / len(loader)
+
+def validate(model, loader, criterion, device):
+    model.eval()
+    total_loss, total_dice = 0, 0
+    with torch.no_grad():
+        for imgs, targets in tqdm(loader, desc="Validating"):
+            imgs = imgs.to(device)
+            targets = targets.to(device).float()
+            if targets.dim() == 3: targets = targets.unsqueeze(1)
+                
+            preds = model(imgs)
+            loss = criterion(preds, targets)
+            total_loss += loss.item()
+            total_dice += dice_coefficient(torch.sigmoid(preds), targets).item()
+    return total_loss / len(loader), total_dice / len(loader)
+
+def collate_fn(batch):
+    imgs, masks = [], []
+    transform_mask = transforms.Compose([
+        transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.NEAREST),
+        transforms.ToTensor()
+    ])
+    for img, label_path in batch:
+        imgs.append(img)
+        mask = Image.open(label_path).convert('L')
+        masks.append(transform_mask(mask))
+    return torch.stack(imgs), torch.stack(masks)
 
 def main():
-    # --- CONFIGURATION ---
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    batch_size = 16
-    epochs = 10  # Linear probing converges quickly
-    lr = 1e-3
-    
-    # Path to the trained LeJEPA backbone checkpoint
-    checkpoint_path = "checkpoints/lejepa/lejepa_pretrain_vit_small_patch16_224/best_backbone.pth"
-    
-    # Data and model paths
-    json_path = "data/ARCADE/processed/dataset.json"
-    root_dir = "."
-    
-    print(f"🚀 Starting Linear Probing for LeJEPA on {device}")
-    print(f"Checkpoint: {checkpoint_path}")
+    # --- Config ---
+    config_path = "config/lejepa_config.yaml"
+    if not os.path.exists(config_path): config_path = "../../config/lejepa_config.yaml"
 
-    # 1. Dataset - Simple transforms (resize + normalize)
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+        
+    device = torch.device(config["system"]["device"] if torch.cuda.is_available() else "cpu")
+    backbone_name = config["model"]["backbone"]
+    experiment_name = f"lejepa_pretrain_{backbone_name}"
+    
+    checkpoint_path = f"./checkpoints/lejepa/{experiment_name}/best_backbone.pth"
+    if not os.path.exists(checkpoint_path):
+        checkpoint_path = f"../../checkpoints/lejepa/{experiment_name}/best_backbone.pth"
+    
+    # Folder pentru vizualizări
+    vis_dir = f"./vis_probing/{experiment_name}"
+
+    print(f"Running Linear Probe for: {backbone_name}")
+    print(f"Outputs will be saved to: {vis_dir}")
+
+    # --- Data ---
     transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))  # ImageNet normalization
+        transforms.Normalize(mean=[0.5], std=[0.5])
     ])
     
-    # Train set (syntax mode: returns image and label path)
-    train_dataset = ArcadeDataset(
-        json_path=json_path,
-        split='train',
-        transform=transform,
-        mode='syntax',  # Lowercase: returns (image, label_path)
-        root_dir=root_dir
-    )
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=2,
-        collate_fn=collate_with_label_loading
-    )
+    json_path = "/workspace/Collateral-Coronary-Vessels-XAI/data/ARCADE/processed/dataset.json"
+    root_dir = "/workspace/Collateral-Coronary-Vessels-XAI"
+    
+    train_ds = ArcadeDataset(json_path, split='train', transform=transform, mode='syntax', root_dir=root_dir)
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=4, collate_fn=collate_fn)
+    
+    val_split = 'validation' if 'validation' in train_ds.data else 'test'
+    val_ds = ArcadeDataset(json_path, split=val_split, transform=transform, mode='syntax', root_dir=root_dir)
+    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
-    # Validation set (if available, else use test)
-    try:
-        val_dataset = ArcadeDataset(
-            json_path=json_path,
-            split='validation',
-            transform=transform,
-            mode='syntax',  # Lowercase
-            root_dir=root_dir
-        )
-        print(f"✓ Validation split found: {len(val_dataset)} samples")
-    except:
-        print("⚠ Validation split not found, using test split...")
-        try:
-            val_dataset = ArcadeDataset(
-                json_path=json_path,
-                split='test',
-                transform=transform,
-                mode='syntax',
-                root_dir=root_dir
-            )
-            print(f"✓ Using test split: {len(val_dataset)} samples")
-        except:
-            print("✗ Neither validation nor test split found. Using 10% of train as val.")
-            val_size = len(train_dataset) // 10
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                train_dataset, [len(train_dataset) - val_size, val_size]
-            )
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False,
-        num_workers=2,
-        collate_fn=collate_with_label_loading
-    )
+    # --- Model ---
+    backbone = get_backbone(model_name=backbone_name, in_channels=1, pretrained=False)
+    if os.path.exists(checkpoint_path):
+        state_dict = torch.load(checkpoint_path, map_location='cpu')
+        clean_state_dict = {k.replace("backbone.", "").replace("encoder.", ""): v for k, v in state_dict.items()}
+        backbone.load_state_dict(clean_state_dict, strict=False)
+        print("Backbone loaded successfully.")
+    else:
+        print("WARNING: Using random weights!")
 
-    # 2. Load Backbone LeJEPA
-    print("Loading Backbone...")
-    
-    # Initialize backbone architecture - ViT-Small (adjust if using different model)
-    backbone = get_backbone(
-        img_size=256, patch_size=16, embed_dim=384, depth=12, num_heads=6  # ViT-Small
-    )
-    
-    # Load checkpoint
-    if not os.path.exists(checkpoint_path):
-        print(f"✗ Checkpoint not found: {checkpoint_path}")
-        return
-    
-    ckpt = torch.load(checkpoint_path, map_location='cpu')
-    
-    # Clean state dict keys (handle 'encoder.', 'backbone.', 'module.' prefixes)
-    state_dict = ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt
-    clean_dict = {}
-    for k, v in state_dict.items():
-        # Keep only backbone/encoder weights, skip predictor
-        if 'predictor' not in k:
-            name = k.replace('encoder.', '').replace('backbone.', '').replace('module.', '')
-            clean_dict[name] = v
-             
-    msg = backbone.load_state_dict(clean_dict, strict=False)
-    print(f"✓ Backbone loaded: {msg}")
+    probe_model = LinearProbeLeJEPA(backbone, in_channels=1).to(device)
 
-    # 3. Create Linear Probe Model
-    # embed_dim must match ViT dimension (384 for Small, 768 for Base)
-    model = LinearProbeLeJEPA(backbone, img_size=256, patch_size=16, embed_dim=384).to(device)
-    print(f"✓ Probe model created on {device}")
-
-    # 4. Training Setup
-    # Optimize ONLY the probe head (backbone is frozen in __init__)
-    optimizer = optim.AdamW(model.head.parameters(), lr=lr)
-    criterion = torch.nn.BCEWithLogitsLoss()
+    optimizer = optim.AdamW(probe_model.head.parameters(), lr=1e-3)
+    criterion = nn.BCEWithLogitsLoss()
     
-    print(f"\n{'='*60}")
-    print(f"Training Configuration:")
-    print(f"  Epochs: {epochs}")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Learning rate: {lr}")
-    print(f"  Device: {device}")
-    print(f"  Train samples: {len(train_dataset)}")
-    print(f"  Val samples: {len(val_dataset)}")
-    print(f"{'='*60}\n")
-
-    best_val_dice = 0.0
+    epochs = 50
+    best_dice = 0.0
     
-    # Training loop
     for epoch in range(epochs):
-        # --- TRAINING ---
-        model.train()
-        train_loss = 0.0
-        train_dice = 0.0
+        train_loss, train_dice = train_one_epoch(probe_model, train_loader, optimizer, criterion, device)
+        val_loss, val_dice = validate(probe_model, val_loader, criterion, device)
         
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [TRAIN]")
-        for imgs, masks in pbar:
-            imgs = imgs.to(device)
-            masks = masks.to(device).float()
-            
-            # Ensure mask shape (B, 1, H, W)
-            if masks.dim() == 3:
-                masks = masks.unsqueeze(1)
-            elif masks.dim() == 4 and masks.shape[1] > 1:
-                # If multi-channel, take first channel
-                masks = masks[:, 0:1, :, :]
-            
-            optimizer.zero_grad()
-            
-            preds = model(imgs)
-            loss = criterion(preds, masks)
-            
-            loss.backward()
-            optimizer.step()
-            
-            train_loss += loss.item()
-            
-            # Compute Dice for monitoring
-            with torch.no_grad():
-                pred_binary = (torch.sigmoid(preds) > 0.5).float()
-                dice = compute_dice(pred_binary, masks)
-                train_dice += dice.item()
-            
-            pbar.set_postfix({
-                'loss': loss.item(),
-                'dice': dice.item()
-            })
+        print(f"Epoch {epoch+1}/{epochs} | Val Dice: {val_dice:.4f}")
         
-        avg_train_loss = train_loss / len(train_loader)
-        avg_train_dice = train_dice / len(train_loader)
+        # Vizualizare la fiecare 5 epoci + prima + ultima
+        if epoch == 0 or (epoch + 1) % 5 == 0 or epoch == epochs - 1:
+            visualize_results(probe_model, val_loader, device, epoch + 1, vis_dir)
         
-        # --- VALIDATION ---
-        val_loss, val_dice = validate(model, val_loader, device, criterion)
-        
-        # Save best model
-        if val_dice > best_val_dice:
-            best_val_dice = val_dice
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_dice': val_dice,
-                'val_loss': val_loss
-            }
-            os.makedirs('runs/probing', exist_ok=True)
-            torch.save(checkpoint, 'runs/probing/best_probe.pth')
-            print(f"  ✓ Best model saved at epoch {epoch+1}")
-        
-        # Print epoch results
-        print(f"Epoch {epoch+1:2d}/{epochs} | "
-              f"Train Loss: {avg_train_loss:.4f} | Train Dice: {avg_train_dice:.4f} | "
-              f"Val Loss: {val_loss:.4f} | Val Dice: {val_dice:.4f}")
-
-def compute_dice(pred, target):
-    """Compute Dice score for a batch."""
-    intersection = (pred * target).sum()
-    union = pred.sum() + target.sum()
-    dice = (2.0 * intersection + 1e-6) / (union + 1e-6)
-    return dice
-
-
-def collate_with_label_loading(batch):
-    """Custom collate function to load label images from paths."""
-    images = []
-    masks = []
-    
-    for img, label_path in batch:
-        images.append(img)
-        
-        # Load label image from path
-        try:
-            label_img = Image.open(label_path).convert('L')  # Grayscale
-            label_tensor = transforms.ToTensor()(label_img)
-            masks.append(label_tensor)
-        except Exception as e:
-            print(f"Warning: Could not load label {label_path}: {e}")
-            # Create dummy mask if loading fails
-            masks.append(torch.zeros(1, 224, 224))
-    
-    images_batch = torch.stack(images)
-    masks_batch = torch.stack(masks)
-    
-    return images_batch, masks_batch
-
-
-def validate(model, loader, device, criterion):
-    """Validate the model."""
-    model.eval()
-    total_loss = 0.0
-    total_dice = 0.0
-    
-    with torch.no_grad():
-        for imgs, masks in loader:
-            imgs = imgs.to(device)
-            masks = masks.to(device).float()
-            
-            # Ensure mask shape
-            if masks.dim() == 3:
-                masks = masks.unsqueeze(1)
-            elif masks.dim() == 4 and masks.shape[1] > 1:
-                masks = masks[:, 0:1, :, :]
-            
-            preds = model(imgs)
-            loss = criterion(preds, masks)
-            total_loss += loss.item()
-            
-            # Binary prediction
-            pred_binary = (torch.sigmoid(preds) > 0.5).float()
-            dice = compute_dice(pred_binary, masks)
-            total_dice += dice.item()
-    
-    avg_loss = total_loss / len(loader)
-    avg_dice = total_dice / len(loader)
-    
-    return avg_loss, avg_dice
+        if val_dice > best_dice:
+            best_dice = val_dice
+            torch.save(probe_model.state_dict(), f"{vis_dir}/best_probe.pth")
 
 if __name__ == "__main__":
     main()
