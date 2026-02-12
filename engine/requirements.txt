@@ -11,4 +11,4 @@ torchinfo
 seaborn
 pandas
 
-pip install torch torchvision pyyaml numpy matplotlib tqdm tensorboard opencv-python-headless timm torchinfo seaborn pandas nibabel gdown
+pip install torch torchvision pyyaml numpy matplotlib tqdm tensorboard opencv-python-headless timm torchinfo seaborn pandas nibabel gdown albumentations scikit-learn scikit-image 

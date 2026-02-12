@@ -23,7 +23,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, scaler)
         images = images.to(device)
         masks = masks.to(device)
         optimizer.zero_grad()
-        with torch.amp.autocast('cuda', dtype=torch.float16):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             outputs = model(images, masks)
             reconstruction = None
             if isinstance(outputs, tuple):
@@ -73,9 +73,7 @@ def main():
         base_config = yaml.safe_load(f)
 
     backbones = [
-        "vit_small_patch16_224",
         "convnext_tiny",
-        "swinv2_tiny_window16_256"
     ]
 
     device = torch.device(base_config["system"]["device"] if torch.cuda.is_available() else "cpu")
