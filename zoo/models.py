@@ -1,7 +1,7 @@
 import torch.nn as nn
 import torch
 import numpy as np
-from .backbones import get_backbone
+from backbones import get_backbone
 
 class UNetrUpBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, upscale_factor=2):
@@ -43,6 +43,7 @@ class SegmentatorCoronare(nn.Module):
         self.up2 = UNetrUpBlock(64, 32)
         self.up3 = UNetrUpBlock(32, 16)
         self.up4 = UNetrUpBlock(16, 16)
+        self.up5 = UNetrUpBlock(16, 16)
         
         self.out_conv = nn.Conv2d(16, num_classes, kernel_size=1)
         
@@ -53,5 +54,14 @@ class SegmentatorCoronare(nn.Module):
         x = self.up2(x)
         x = self.up3(x)
         x = self.up4(x)
+        x = self.up5(x)
         x = self.out_conv(x)
         return x
+    
+
+def test():
+    model = SegmentatorCoronare(backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1, num_classes=1)
+    du = torch.randn(1, 1, 256, 256)
+    predict = model(du)
+    print(predict.shape)
+    
