@@ -1,0 +1,60 @@
+experiment_name: "Coronary_Segmentation_Ablation"
+
+# LISTA CU CELE 9 MODELE (Pui tu calea corectă către .pth pentru fiecare)
+models_to_test:
+  # - name: "swinv2_tiny_dino"
+  #   backbone_type: "swinv2_tiny_window16_256"
+  #   weights_path: "checkpoints/dino/dino_pretrain_swinv2_tiny_window16_256/best_backbone.pth"
+
+  - name: "swinv2_tiny_lejepa"
+    backbone_type: "swinv2_tiny_window16_256"
+    weights_path: "checkpoints/lejepa/lejepa_pretrain_swinv2_tiny_window16_256/best_backbone.pth"
+
+  # - name: "swinv2_tiny_simmim"
+  #   backbone_type: "swinv2_tiny_window16_256"
+  #   weights_path: "checkpoints/mim/simmim_pretrain_swinv2_tiny_window16_256/best_backbone.pth"
+
+
+  # - name: "vit_small_patch16_224_dino"
+  #   backbone_type: "vit_small_patch16_224"
+  #   weights_path: "checkpoints/dino/dino_pretrain_vit_small_patch16_224/best_backbone.pth"
+
+  # - name: "vit_small_patch16_224_lejepa"
+  #   backbone_type: "vit_small_patch16_224"
+  #   weights_path: "checkpoints/lejepa/lejepa_pretrain_vit_small_patch16_224/best_backbone.pth"
+
+  # - name: "vit_small_patch16_224_simmim"
+  #   backbone_type: "vit_small_patch16_224"
+  #   weights_path: "checkpoints/mim/simmim_pretrain_vit_small_patch16_224/best_backbone.pth"
+  
+  # # - name: "convnext_tiny_dino"
+  # #   backbone_type: "convnext_tiny"
+  # #   weights_path: "checkpoints/dino/dino_pretrain_convnext_tiny/best_backbone.pth"
+
+  # - name: "convnext_tiny_lejepa"
+  #   backbone_type: "convnext_tiny"
+  #   weights_path: "checkpoints/lejepa/lejepa_pretrain_convnext_tiny/best_backbone.pth"
+
+  # - name: "convnext_tiny_simmim"
+  #   backbone_type: "convnext_tiny"
+  #   weights_path: "checkpoints/mim/simmim_pretrain_convnext_tiny/best_backbone.pth"
+
+
+  # Adaugă restul modelelor tale aici (SimMIM, Lejepa, ConvNeXt, etc.)
+  # - name: "convnext_simmim"
+  #   backbone_type: "convnext_tiny"
+  #   weights_path: "checkpoints/mim/simmim_convnext.../best_backbone.pth"
+
+data:
+  json_path: "data/ARCADE/processed/dataset.json"
+  root_dir: "."
+  input_size: 512
+  batch_size: 16
+  num_workers: 4
+
+training:
+  epochs: 50
+  lr: 0.001  
+  weight_decay: 1e-5
+  device: "cuda"
+  save_dir: "checkpoints/segmentation/"

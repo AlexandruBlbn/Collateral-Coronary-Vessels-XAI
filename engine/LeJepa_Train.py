@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm import tqdm
 import torchvision.transforms as transforms
@@ -16,6 +16,24 @@ from zoo.backbones import get_backbone
 from zoo.lejepa_components.lejepa_loss import SIGReg
 from utils.logger import TensorboardLogger
 
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
+
+# --- ADAUGĂM UN WRAPPER CARE ARUNCĂ ETICHETELE (Pentru Pretrain) ---
+class PretrainWrapper(Dataset):
+    def __init__(self, base_dataset):
+        self.base_dataset = base_dataset
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        # Base dataset returnează (views_tensor, label_path_or_none)
+        # La pre-antrenare, nu ne interesează label-ul absolut deloc.
+        views, _ = self.base_dataset[idx]
+        return views
+
+# -------------------------------------------------------------------
 
 class LeJEPAProjector(nn.Module):
     """MLP projector: maps pooled backbone features to a low-dim embedding."""
@@ -115,7 +133,8 @@ def train_one_epoch(model, sigreg, dataloader, optimizer, scheduler,
 
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
     for step, views in enumerate(progress_bar):
-        views = views.to(device, non_blocking=True)  # (B, V, C, H, W)
+        # ACUM views ESTE STRICT UN TENSOR (B, V, C, H, W), FĂRĂ LABELURI
+        views = views.to(device, non_blocking=True)  
 
         optimizer.zero_grad()
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
@@ -193,17 +212,20 @@ def main():
         json_path = "/workspace/Collateral-Coronary-Vessels-XAI/data/ARCADE/processed/dataset.json"
         root_dir = "/workspace/Collateral-Coronary-Vessels-XAI"
 
-        dataset = ArcadeDataset(
+        base_dataset = ArcadeDataset(
             json_path=json_path, split='train', transform=transform,
             mode='pretrain', root_dir=root_dir
         )
+        
+        # APLICĂM WRAPPER-UL AICI
+        wrapped_dataset = PretrainWrapper(base_dataset)
 
         train_loader = DataLoader(
-            dataset,
+            wrapped_dataset,
             batch_size=config["data"]["batch_size"],
             shuffle=True,
             num_workers=config["data"]["num_workers"],
-            pin_memory=True,
+            pin_memory=False, # Este stabil și cu file_system
             drop_last=True,
         )
 
@@ -224,7 +246,7 @@ def main():
             lr=float(config["optimizer"]["lr"]),
             weight_decay=config["optimizer"]["weight_decay"],
         )
-        scaler = torch.amp.GradScaler(enabled=(device.type == 'cuda'))
+        scaler = torch.amp.GradScaler('cuda')
 
         epochs = config["optimizer"]["epochs"]
         warmup_epochs = config["optimizer"].get("warmup_epochs", 10)

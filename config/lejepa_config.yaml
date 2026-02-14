@@ -1,7 +1,7 @@
-experiment_name: "lejepa_pretrain_vit_small_patch16_224"
+experiment_name: "lejepa_pretrain_swinv2_tiny_window16_256"
 
 model:
-  backbone: "vit_small_patch16_224"
+  backbone: "swinv2_tiny_window16_256"
   input_size: 256
   proj_dim: 128
   proj_hidden_dim: 2048
