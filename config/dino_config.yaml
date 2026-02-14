@@ -1,8 +1,16 @@
+<<<<<<< HEAD
 experiment_name: "dino_pretrain_swinv2_tiny_window16_256"
 
 model:
   backbone: "swinv2_tiny_window16_256"
   teacher_backbone_path: "checkpoints/mim/simmim_pretrain_swinv2_tiny_window16_256/best_backbone.pth"
+=======
+experiment_name: "dino_pretrain_convnext_tiny"
+
+model:
+  backbone: "convnext_tiny"
+  teacher_backbone_path: "checkpoints/mim/simmim_pretrain_convnext_tiny/best_backbone.pth"
+>>>>>>> 2d5c4c9 (feat: Update DINO configuration and add new training script)
   input_size: 256
   feature_dim: 768
   
