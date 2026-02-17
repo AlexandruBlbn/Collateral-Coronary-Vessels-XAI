@@ -45,19 +45,21 @@ import numpy as np
 
 set_seed(42)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+model = smp.Unet(encoder_name="tu-focalnet_small_srf", encoder_weights=None,in_channels=1, classes=1, activation=None).to(device)
+Name = model.__class__.__name__ + "_" + model.encoder.name #decoder-encoder
 #---------------------
 batch_size = 16
 epochs = 100
 learning_rate = 1e-4
 min_lr = 1e-6
-Name = "DeepLabV3Plus_CoatNet_1_rw_256"
+
 checkpoint_dir = f'checkpoints/{Name}'
 log_dir = f'runs/{Name}'
 os.makedirs(checkpoint_dir, exist_ok=True)
+img_size = 256
 
 
-model = smp.UnetPlusPlus(encoder_name="tu-coatnet_1_rw_224", encoder_weights=None,in_channels=1, classes=1, activation=None).to(device)
+
 # model = BasicUNet(
 #     spatial_dims=2,
 #     in_channels=1,
@@ -126,9 +128,9 @@ train_base = ArcadeDataset(split='train', transform=None, root_dir='.', json_pat
 val_base   = ArcadeDataset(split='validation', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
 test_base  = ArcadeDataset(split='test', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
 
-train_ds = TransformsWrapper(train_base, input_size=224, mode='train')
-val_ds   = TransformsWrapper(val_base, input_size=224, mode='val')
-test_ds  = TransformsWrapper(test_base, input_size=224, mode='val')
+train_ds = TransformsWrapper(train_base, input_size=img_size, mode='train')
+val_ds   = TransformsWrapper(val_base, input_size=img_size, mode='val')
+test_ds  = TransformsWrapper(test_base, input_size=img_size, mode='val')
 
 train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True)
 val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True)
@@ -185,7 +187,7 @@ def validate_epoch(model, dataloader, criterion, device, epoch_num):
             loss = criterion(outputs, masks)
             epoch_loss += loss.item()
             
-            preds = (outputs > 0.5).float()
+            preds = (outputs > 0.0).float()
             iou_score += iou(preds, masks.int()).item()
             f1_score += f1(preds, masks.int()).item()
             
@@ -221,7 +223,7 @@ def test_epoch(model, dataloader, device):
             images, masks = images.to(device), masks.to(device)
             outputs = model(images)
             
-            preds = (outputs > 0.5).float()
+            preds = (outputs > 0.0).float()
             iou_score += iou(preds, masks.int()).item()
             f1_score += f1(preds, masks.int()).item()
             
@@ -249,7 +251,7 @@ def test_epoch(model, dataloader, device):
 
 if __name__ == "__main__":
     best_f1 = 0
-    summary(model, input_size=(16, 1, 224, 224))
+    # summary(model, input_size=(16, 1, 256,256))
     for epoch in range(epochs):
         print(f"\nEpoch {epoch + 1}/{epochs}")
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)

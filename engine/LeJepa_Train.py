@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm import tqdm
 import torchvision.transforms as transforms
 from torchmetrics.classification import BinaryF1Score
-from PIL import Image  # --- NECESAR PENTRU INCARCAREA MASTILOR
+from PIL import Image  
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from data.dataloader import ArcadeDataset
@@ -380,3 +380,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
