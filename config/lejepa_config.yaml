@@ -1,17 +1,17 @@
-experiment_name: "lejepa_pretrain_swinv2_tiny_window16_256"
+experiment_name: "lejepa_pretrain_vit_small_patch16_224"
 
 model:
-  backbone: "swinv2_tiny_window16_256"
+  backbone: "vit_small_patch16_224"
   input_size: 256
-  proj_dim: 128
+  proj_dim: 256
   proj_hidden_dim: 2048
 
 data:
-  batch_size: 32
+  batch_size: 16
   num_workers: 4
   in_channels: 1
   n_views: 4
-  global_scale_min: 0.3
+  global_scale_min: 0.5
   global_scale_max: 1.0
 
 optimizer:
@@ -21,7 +21,7 @@ optimizer:
   warmup_epochs: 10
 
 lejepa:
-  lamb: 0.02
+  lamb: 0.15
   sigreg_knots: 17
 
 system:

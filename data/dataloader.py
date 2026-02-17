@@ -74,17 +74,20 @@ class ArcadeDataset(Dataset):
     def __getitem__(self, idx):
         item = self.samples[idx]
         img_path = item['image_path']
+        label_path = item['label']
 
         if self.root_dir:
             img_path = os.path.join(self.root_dir, img_path)
-        
+            label_path = os.path.join(self.root_dir, label_path)
         image = Image.open(img_path).convert('L')
+        label = Image.open(label_path).convert('L')
 
         if self.transform:
             image = self.transform(image)
+            label = self.transform(label)
 
         # All modes return (image, label)
-        return image, item.get('label')
+        return image, label
 
 
 def test_dataloader():

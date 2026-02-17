@@ -1,218 +1,266 @@
 import os
 import sys
+import yaml
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-import random
-from torchvision import transforms
 from torch.utils.data import DataLoader, Dataset
+from torch.optim.lr_scheduler import  CosineAnnealingLR
 from tqdm import tqdm
-from PIL import Image
-import torchvision.transforms.functional as TF
-from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.classification import BinaryJaccardIndex, BinaryF1Score
-from torchvision.models.segmentation import deeplabv3_resnet50
+import torchvision.transforms as transforms
+from torchmetrics.classification import BinaryF1Score
+import torchvision.transforms.functional  as tf
+from PIL import Image 
+import timm as timm
+import torchvision
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from data.dataloader import ArcadeDataset
+from utils.logger import TensorboardLogger
+import segmentation_models_pytorch as smp
+import cv2
+from monai.networks.nets.basic_unet import BasicUNet
+from torchinfo import summary
+
+import monai
+
+
+from torchmetrics.classification import (
+    BinaryJaccardIndex, 
+    BinaryF1Score
+)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, '..'))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+from zoo.models import SegmentatorCoronare, SegmentatorCoronarePlusPlus
 from data.dataloader import ArcadeDataset
-import cv2
+from torch.utils.tensorboard import SummaryWriter
+from utils.helpers import set_seed
 import numpy as np
 
-class SegmentationWrapper(Dataset):
-    def __init__(self, base_dataset, input_size=256, root_dir='.', augment=False):
-        self.base_dataset = base_dataset
-        self.root_dir = root_dir
+
+
+set_seed(42)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+#---------------------
+batch_size = 16
+epochs = 100
+learning_rate = 1e-4
+min_lr = 1e-6
+Name = "DeepLabV3Plus_CoatNet_1_rw_256"
+checkpoint_dir = f'checkpoints/{Name}'
+log_dir = f'runs/{Name}'
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+
+model = smp.UnetPlusPlus(encoder_name="tu-coatnet_1_rw_224", encoder_weights=None,in_channels=1, classes=1, activation=None).to(device)
+# model = BasicUNet(
+#     spatial_dims=2,
+#     in_channels=1,
+#     out_channels=1,
+#     features=(32, 64, 128, 256, 512, 32),
+#     act="LeakyReLU",
+#     norm="instance",
+#     dropout=0.2
+# ).to(device) - nnU-Net
+
+
+#---------------------
+
+def saveConfig(path):
+    config = {
+        'batch_size': batch_size,
+        'epochs': epochs,
+        'learning_rate': learning_rate,
+        'min_lr': min_lr,
+        'model': Name
+        
+    }
+    with open(path, 'w') as f:
+        yaml.dump(config, f)
+    
+saveConfig(os.path.join(checkpoint_dir, 'config.yaml'))
+
+class TransformsWrapper():
+    def __init__(self, dataset, input_size=224, mode='train'):
+        self.dataset = dataset
         self.input_size = input_size
-        self.augment = augment
-        # Base normalization
-        self.normalize = transforms.Normalize(mean=[0.5], std=[0.5])
-
-    def apply_tophat(self, img_pil, kernel_size=15):
-        """
-        Applies Morphological Top-Hat Transform to highlight small vessels.
-        TopHat(I) = I - Open(I)
-        """
-        # Convert PIL to Numpy (Grayscale)
-        img_np = np.array(img_pil)
+        self.mode = mode
+        self.root_dir = '.'
         
-        # Define structural element (kernel)
-        # Size 15 is typical for coronary vessels (adjust based on vessel thickness)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-        
-        # Apply Top-Hat
-        tophat_img = cv2.morphologyEx(img_np, cv2.MORPH_TOPHAT, kernel)
-        
-        # Add Top-Hat result back to original image to enhance details
-        # Or return just tophat_img if you want to remove background entirely.
-        # Strategy: Enhance features
-        enhanced_img = cv2.add(img_np, tophat_img)
-        
-        return Image.fromarray(enhanced_img)
-
-    def transform(self, image, mask):
-        # Resize mandatory
-        image = TF.resize(image, (self.input_size, self.input_size))
-        mask = TF.resize(mask, (self.input_size, self.input_size), interpolation=transforms.InterpolationMode.NEAREST)
-
-        if self.augment:
-            # --- 1. Top-Hat Enhancement (Probabilistic) ---
-            # We apply this BEFORE geometric transforms to enhance vessel contrast
-            if random.random() > 0.3:
-                image = self.apply_tophat(image, kernel_size=random.choice([9, 15, 21]))
-
-            # --- 2. Geometric Augmentations ---
-            angle = random.uniform(-20, 20)
-            image = TF.rotate(image, angle)
-            mask = TF.rotate(mask, angle)
-
-            if random.random() > 0.5:
-                image = TF.hflip(image)
-                mask = TF.hflip(mask)
-
-            # --- 3. Intensity Augmentations ---
-            if random.random() > 0.3:
-                image = TF.adjust_brightness(image, random.uniform(0.8, 1.2))
-                image = TF.adjust_contrast(image, random.uniform(0.8, 1.2))
-
-            # --- 4. Noise ---
-            if random.random() > 0.5:
-                img_tensor = TF.to_tensor(image)
-                noise = torch.randn_like(img_tensor) * 0.02
-                image = TF.to_pil_image(torch.clamp(img_tensor + noise, 0, 1))
-
-        # Final Conversion
-        image = TF.to_tensor(image)
-        mask = TF.to_tensor(mask)
-        
-        image = self.normalize(image)
-        mask = (mask > 0).float()
-        
-        return image, mask
-
     def __len__(self):
-        return len(self.base_dataset)
-
+        return len(self.dataset)
+    
     def __getitem__(self, idx):
-        image_pil, label_path = self.base_dataset[idx]
-        if label_path is None:
-            raise ValueError(f"Label path lipsă pentru indexul {idx}")
+        img, label = self.dataset[idx]
+        img = img.resize((self.input_size, self.input_size), resample=Image.BILINEAR)
+        mask = label.resize((self.input_size, self.input_size), resample=Image.NEAREST)
+
+        if self.mode == 'train':
+            if torch.rand(1).item() > 0.5:
+                img = tf.hflip(img)
+                mask = tf.hflip(mask)
+            if torch.rand(1).item() > 0.5:
+                img = tf.vflip(img)
+                mask = tf.vflip(mask)
             
-        full_label_path = os.path.join(self.root_dir, label_path)
-        mask_pil = Image.open(full_label_path).convert('L')
+            angle = torch.randint(-15, 15, (1,)).item()
+            img = tf.rotate(img, angle)
+            mask = tf.rotate(mask, angle)
         
-        return self.transform(image_pil, mask_pil)
+        img = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(np.array(img))
+        img = tf.to_tensor(img)
+        img = tf.normalize(img, [0.5], [0.5])
+        mask = tf.to_tensor(mask)
 
-class DiceBCELoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.bce = nn.BCEWithLogitsLoss()
-    
-    def forward(self, inputs, targets):
-        bce = self.bce(inputs, targets)
-        inputs = torch.sigmoid(inputs)
-        intersection = (inputs * targets).sum()
-        dice = (2. * intersection + 1) / (inputs.sum() + targets.sum() + 1)
-        return bce + (1 - dice)
-
-def train_deeplab_pytorch():
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    run_name = "DeepLabV3_ResNet50_PyTorch"
-    writer = SummaryWriter(f"runs/{run_name}")
-    batch_size = 16
-    epochs = 100
-    lr = 1e-4
-
-    json_path = '/workspace/Collateral-Coronary-Vessels-XAI/data/ARCADE/processed/dataset.json'
-    root_dir = '/workspace/Collateral-Coronary-Vessels-XAI'
-    
-    train_loader = DataLoader(
-        SegmentationWrapper(ArcadeDataset(json_path, split='train', mode='syntax'), root_dir=root_dir, augment=True),
-        batch_size=batch_size, shuffle=True, num_workers=4
-    )
-    val_loader = DataLoader(
-        SegmentationWrapper(ArcadeDataset(json_path, split='validation', mode='syntax'), root_dir=root_dir, augment=False),
-        batch_size=batch_size, shuffle=False, num_workers=4
-    )
-
-    print(f"Starting Training: {run_name}")
-    
-    # Initialize standard DeepLabV3 from torchvision
-    model = deeplabv3_resnet50(num_classes=1)
-    
-    # Modify the first convolutional layer to accept 1 channel instead of 3
-    model.backbone.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-    
-    model.to(device)
-
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    loss_fn = DiceBCELoss()
-    
-    metric_iou = BinaryJaccardIndex().to(device)
-    metric_f1 = BinaryF1Score().to(device)
-
-    best_iou = 0.0
-
-    for epoch in range(epochs):
-        model.train()
-        train_loss = 0.0
-        
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
-        for imgs, masks in pbar:
-            imgs, masks = imgs.to(device), masks.to(device)
+        return img, mask
             
-            optimizer.zero_grad()
+        
+
+
+train_base = ArcadeDataset(split='train', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+val_base   = ArcadeDataset(split='validation', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+test_base  = ArcadeDataset(split='test', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+
+train_ds = TransformsWrapper(train_base, input_size=224, mode='train')
+val_ds   = TransformsWrapper(val_base, input_size=224, mode='val')
+test_ds  = TransformsWrapper(test_base, input_size=224, mode='val')
+
+train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True)
+val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True)
+test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True)
+
+
+
+
+optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+dice_loss = smp.losses.DiceLoss(mode='binary', from_logits=True)
+bce_loss = smp.losses.SoftBCEWithLogitsLoss()
+criterion = dice_loss
+scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=min_lr)
+
+writer = SummaryWriter(log_dir=log_dir)
+
+iou = BinaryJaccardIndex().to(device)
+f1 = BinaryF1Score().to(device)
+
+#----------------------
+device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+def train_epoch(model, dataloader, optimizer, criterion, device):
+    model.train()
+    running_loss = 0
+    pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc="Training", leave=False)
+    for batch_idx, (images, masks) in pbar:
+        images, masks = images.to(device), masks.to(device)
+        optimizer.zero_grad()
+        with torch.autocast(device_type = device_type, dtype=torch.bfloat16):
+            outputs = model(images)
+            loss = criterion(outputs, masks)
             
-            # Torchvision models return an OrderedDict: {'out': tensor, 'aux': tensor}
-            outputs = model(imgs)
-            logits = outputs['out']
             
-            loss = loss_fn(logits, masks)
-            loss.backward()
-            optimizer.step()
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        current_loss = running_loss / (batch_idx + 1)
+        pbar.set_postfix({'loss': current_loss})
+        writer.add_scalar("Train Loss", current_loss, pbar.n + 1)
+    return running_loss / len(dataloader)
+
+def validate_epoch(model, dataloader, criterion, device, epoch_num):
+    model.eval()
+    epoch_loss = 0
+    iou_score = 0
+    f1_score = 0
+    pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc="Validare", leave=False)
+    with torch.no_grad():
+        for (batch_idx, (images, masks)) in pbar:
+            images, masks = images.to(device), masks.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            epoch_loss += loss.item()
             
-            train_loss += loss.item()
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+            preds = (outputs > 0.5).float()
+            iou_score += iou(preds, masks.int()).item()
+            f1_score += f1(preds, masks.int()).item()
+            
+            if batch_idx == 0:
+                img = images * 0.5 + 0.5
+                num_samples = min(4, images.size(0))
+                grid_images = []
+                for i in range(num_samples):
+                    grid_images.append(img[i].cpu())
+                    grid_images.append(preds[i].float().cpu())
+                    grid_images.append(masks[i].float().cpu())
+                grid = torchvision.utils.make_grid(grid_images, nrow=3, padding=2)
+                writer.add_image("Val Predictions", grid, epoch_num)
+            
+            pbar.set_postfix({
+                'loss': epoch_loss / (pbar.n + 1),
+                'iou': iou_score / (pbar.n + 1),
+                'f1': f1_score / (pbar.n + 1)
+            })
+        print(f"Val Loss: {epoch_loss / len(dataloader):.4f} | IoU: {iou_score / len(dataloader):.4f} | F1: {f1_score / len(dataloader):.4f}")
+        writer.add_scalar("Val F1", f1_score / len(dataloader), epoch_num)
+        writer.add_scalar("Val IoU", iou_score / len(dataloader), epoch_num)        
+    return epoch_loss / len(dataloader), iou_score / len(dataloader), f1_score / len(dataloader)
 
-        model.eval()
-        val_iou = 0.0
-        val_f1 = 0.0
-        
-        with torch.no_grad():
-            for imgs, masks in val_loader:
-                imgs, masks = imgs.to(device), masks.to(device)
-                outputs = model(imgs)
-                logits = outputs['out']
-                probs = torch.sigmoid(logits)
-                
-                val_iou += metric_iou(probs, masks.int()).item()
-                val_f1 += metric_f1(probs, masks.int()).item()
-        
-        avg_iou = val_iou / len(val_loader)
-        avg_f1 = val_f1 / len(val_loader)
-        avg_train_loss = train_loss / len(train_loader)
-        
-        writer.add_scalar("Loss/Train", avg_train_loss, epoch)
-        writer.add_scalar("IoU/Val", avg_iou, epoch)
-        writer.add_scalar("F1/Val", avg_f1, epoch)
-        writer.add_scalar("LR", optimizer.param_groups[0]['lr'], epoch)
-        
-        print(f"Epoch {epoch+1} | Val IoU: {avg_iou:.4f} | Val F1: {avg_f1:.4f} | Train Loss: {avg_train_loss:.4f}")
 
-        if avg_iou > best_iou:
-            best_iou = avg_iou
-            save_path = f"runs/{run_name}/best_deeplab.pth"
-            torch.save(model.state_dict(), save_path)
-            print(f"New best model saved: {save_path}")
+def test_epoch(model, dataloader, device):
+    model.eval()
+    iou_score = 0
+    f1_score = 0
+    pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc="Testare", leave=False)
+    with torch.no_grad():
+        for (batch_idx, (images, masks)) in pbar:
+            images, masks = images.to(device), masks.to(device)
+            outputs = model(images)
+            
+            preds = (outputs > 0.5).float()
+            iou_score += iou(preds, masks.int()).item()
+            f1_score += f1(preds, masks.int()).item()
+            
+            if batch_idx == 0:
+                img = images * 0.5 + 0.5
+                num_samples = min(4, images.size(0))
+                grid_images = []
+                for i in range(num_samples):
+                    grid_images.append(img[i].cpu())
+                    grid_images.append(preds[i].float().cpu())
+                    grid_images.append(masks[i].float().cpu())
+                grid = torchvision.utils.make_grid(grid_images, nrow=3, padding=2)
+                writer.add_image("Test Predictions", grid, 0)
+            
+            pbar.set_postfix({
+                'iou': iou_score / (pbar.n + 1),
+                'f1': f1_score / (pbar.n + 1)
+            })
+        print(f"Test IoU: {iou_score / len(dataloader):.4f} | F1: {f1_score / len(dataloader):.4f}")
+        writer.add_scalar("Test F1", f1_score / len(dataloader), 0)
+        writer.add_scalar("Test IoU", iou_score / len(dataloader), 0)
+    
+    return iou_score / len(dataloader), f1_score / len(dataloader)
 
-        scheduler.step()
-
-    writer.close()
-    print("Training finished.")
 
 if __name__ == "__main__":
-    train_deeplab_pytorch()
+    best_f1 = 0
+    summary(model, input_size=(16, 1, 224, 224))
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch + 1}/{epochs}")
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        val_loss, val_iou, val_f1 = validate_epoch(model, val_loader, criterion, device, epoch)
+        scheduler.step()
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            torch.save(model.state_dict(), os.path.join(checkpoint_dir, 'best_model.pth'))
+            print(f"Model cu F1 nou salvat: {best_f1:.4f}")
+    
+    #test
+    model.load_state_dict(torch.load(os.path.join(checkpoint_dir, 'best_model.pth')))
+    test_iou, test_f1 = test_epoch(model, test_loader, device)
+    

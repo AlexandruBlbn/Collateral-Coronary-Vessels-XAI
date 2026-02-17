@@ -1,10 +1,3 @@
-<<<<<<< HEAD
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
-
-=======
 import os
 import sys
 import yaml
@@ -314,6 +307,50 @@ def train_model_run(run_name, config, train_loader, val_loader, model_config, is
         scheduler.step()
 
     writer.close()
+    
+    
+def evaluate_model_run(run_name, config, test_loader, model_config):
+    print(f"\n{'='*50}\nEvaluating Run: {run_name}\n{'='*50}")
+    device = torch.device(config['training']['device'])
+    
+    # Instantiate Model
+    model = SegmentatorCoronare(backbone=model_config['backbone_type'], in_channels=1, num_classes=1).to(device)
+    
+    # Load best checkpoint
+    checkpoint_path = os.path.join(project_root, config['training']['save_dir'], run_name, "best.pth")
+    
+    if os.path.exists(checkpoint_path):
+        state_dict = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(state_dict)
+        print(f"Loaded checkpoint from {checkpoint_path}")
+    else:
+        print(f"Checkpoint not found at {checkpoint_path}")
+        return
+
+    model.eval()
+    
+    metrics = {
+        "IoU": BinaryJaccardIndex().to(device),
+        "F1": BinaryF1Score().to(device),
+        "Spec": BinarySpecificity().to(device),
+        "Sens": BinaryRecall().to(device)
+    }
+    
+    for m in metrics.values(): m.reset()
+    
+    with torch.no_grad():
+        for imgs, masks in tqdm(test_loader, desc="Testing"):
+            imgs, masks = imgs.to(device), masks.to(device)
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                logits = model(imgs)
+            
+            probs = torch.sigmoid(logits)
+            for m in metrics.values(): m.update(probs, masks.int())
+            
+    print("\nTest Results:")
+    for name, m in metrics.items():
+        print(f"{name}: {m.compute().item():.4f}")
+
 
 def main():
     with open("config/segmentation_config.yaml", "r") as f:
@@ -321,20 +358,26 @@ def main():
 
     base_train = ArcadeDataset(config['data']['json_path'], split='train', mode='syntax')
     base_val = ArcadeDataset(config['data']['json_path'], split='validation', mode='syntax')
+    base_test = ArcadeDataset(config['data']['json_path'], split='test', mode='syntax')
     
     train_ds = SegmentationWrapper(base_train, root_dir=config['data']['root_dir'], augment=True)
     val_ds = SegmentationWrapper(base_val, root_dir=config['data']['root_dir'], augment=False)
+    test_ds = SegmentationWrapper(base_test, root_dir=config['data']['root_dir'], augment=False)
 
     train_loader = DataLoader(train_ds, batch_size=config['data']['batch_size'], shuffle=True, num_workers=4)
     val_loader = DataLoader(val_ds, batch_size=config['data']['batch_size'], shuffle=False, num_workers=4)
+    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=4)
 
     for m_cfg in config['models_to_test']:
         # Step 1: Frozen (if not already done)
         # train_model_run(f"{m_cfg['name']}_FROZEN_UnetP", config, train_loader, val_loader, m_cfg, is_frozen=True)
 
         # Step 2: Unfrozen with Differential LR
-        train_model_run(f"{m_cfg['name']}_UNFROZEN_UnetP_v2", config, train_loader, val_loader, m_cfg, is_frozen=False)
+        run_name = f"{m_cfg['name']}_FROZEN"
+        # train_model_run(run_name, config, train_loader, val_loader, m_cfg, is_frozen=False)
+        
+        # Step 3: Evaluation
+        evaluate_model_run(run_name, config, test_loader, m_cfg)
 
 if __name__ == "__main__":
     main()
->>>>>>> 2d5c4c9 (feat: Update DINO configuration and add new training script)

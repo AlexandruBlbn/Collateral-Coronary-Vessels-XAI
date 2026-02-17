@@ -167,6 +167,15 @@ class DiceFocalLoss(nn.Module):
         
         return dice_loss + focal
 
+def log_images_to_tensorboard(writer, images, true_masks, pred_logits, step, prefix="Train"):
+    n_images = min(4, images.shape[0])
+    for i in range(n_images):
+        img_display = (images[i] * 0.5) + 0.5
+        img_display = torch.clamp(img_display, 0, 1)
+        pred_prob = torch.sigmoid(pred_logits[i])
+        grid = torch.cat([img_display, true_masks[i], pred_prob], dim=2)
+        writer.add_image(f'{prefix}_Visuals/Sample_{i}', grid, step)
+
 def train_original_unet():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     run_name = "nnUnet"
@@ -206,7 +215,7 @@ def train_original_unet():
         train_loss = 0.0
         
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
-        for imgs, masks in pbar:
+        for batch_idx, (imgs, masks) in enumerate(pbar):
             imgs, masks = imgs.to(device), masks.to(device)
             
             optimizer.zero_grad()
@@ -217,19 +226,25 @@ def train_original_unet():
             
             train_loss += loss.item()
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+            
+            if batch_idx == 0:
+                log_images_to_tensorboard(writer, imgs, masks, logits, epoch, "Train")
 
         model.eval()
         val_iou = 0.0
         val_f1 = 0.0
         
         with torch.no_grad():
-            for imgs, masks in val_loader:
+            for batch_idx, (imgs, masks) in enumerate(val_loader):
                 imgs, masks = imgs.to(device), masks.to(device)
                 logits = model(imgs)
                 probs = torch.sigmoid(logits)
                 
                 val_iou += metric_iou(probs, masks.int()).item()
                 val_f1 += metric_f1(probs, masks.int()).item()
+                
+                if batch_idx == 0:
+                    log_images_to_tensorboard(writer, imgs, masks, logits, epoch, "Val")
         
         avg_iou = val_iou / len(val_loader)
         avg_f1 = val_f1 / len(val_loader)
@@ -252,6 +267,48 @@ def train_original_unet():
 
     writer.close()
     print("Training finished.")
+    
+def test_original_unet():
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    run_name = "nnUnet"
+    checkpoint_path = f"runs/{run_name}/best_original_unet.pth"
+    
+    json_path = '/workspace/Collateral-Coronary-Vessels-XAI/data/ARCADE/processed/dataset.json'
+    root_dir = '/workspace/Collateral-Coronary-Vessels-XAI'
+    
+    test_loader = DataLoader(
+        SegmentationWrapper(ArcadeDataset(json_path, split='test', mode='syntax'), root_dir=root_dir, augment=False),
+        batch_size=1, shuffle=False, num_workers=4
+    )
+
+    print(f"Evaluating on Test Split...")
+    model = GenericUNet(n_channels=1, n_classes=1, base_filters=32).to(device)
+    
+    if os.path.exists(checkpoint_path):
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        print(f"Loaded weights from {checkpoint_path}")
+    else:
+        print(f"Error: Checkpoint not found at {checkpoint_path}")
+        return
+
+    model.eval()
+    metric_iou = BinaryJaccardIndex().to(device)
+    metric_f1 = BinaryF1Score().to(device)
+    
+    total_iou = 0.0
+    total_f1 = 0.0
+    
+    with torch.no_grad():
+        for imgs, masks in tqdm(test_loader, desc="Testing"):
+            imgs, masks = imgs.to(device), masks.to(device)
+            logits = model(imgs)
+            probs = torch.sigmoid(logits)
+            
+            total_iou += metric_iou(probs, masks.int()).item()
+            total_f1 += metric_f1(probs, masks.int()).item()
+            
+    print(f"\nTest Results:\nIoU: {total_iou/len(test_loader):.4f}\nF1: {total_f1/len(test_loader):.4f}")
 
 if __name__ == "__main__":
-    train_original_unet()
+    # train_original_unet()
+    test_original_unet()

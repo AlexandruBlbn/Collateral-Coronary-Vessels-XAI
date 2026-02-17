@@ -1,13 +1,8 @@
 import os
 import sys
 import torch
-<<<<<<< HEAD
-import numpy as np
-from backbones import get_backbone
-=======
 import torch.nn as nn
 import torch.nn.functional as F
->>>>>>> 2d5c4c9 (feat: Update DINO configuration and add new training script)
 
 # --- SETUP CĂI ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -129,16 +124,8 @@ class SegmentatorCoronare(nn.Module):
         self.skip3 = ConvBlock(64, 128)
         self.pool3 = nn.MaxPool2d(2)
         
-<<<<<<< HEAD
-        self.up1 = UNetrUpBlock(self.decoder_dim, 64)
-        self.up2 = UNetrUpBlock(64, 32)
-        self.up3 = UNetrUpBlock(32, 16)
-        self.up4 = UNetrUpBlock(16, 16)
-        self.up5 = UNetrUpBlock(16, 16)
-=======
         self.skip4 = ConvBlock(128, 256)
         self.pool4 = nn.MaxPool2d(2)
->>>>>>> 2d5c4c9 (feat: Update DINO configuration and add new training script)
         
         # 2. BOTTLENECK
         self.bottleneck = ConvBlock(enc_channels, 512)
@@ -158,25 +145,6 @@ class SegmentatorCoronare(nn.Module):
         self.out_conv = nn.Conv2d(32, num_classes, kernel_size=1)
         
     def forward(self, x):
-<<<<<<< HEAD
-        x = self.backbone(x)
-        x = self.bottleneck(x)
-        x = self.up1(x)
-        x = self.up2(x)
-        x = self.up3(x)
-        x = self.up4(x)
-        x = self.up5(x)
-        x = self.out_conv(x)
-        return x
-    
-
-def test():
-    model = SegmentatorCoronare(backbone='swinv2_tiny_window16_256', pretrained=False, in_channels=1, num_classes=1)
-    du = torch.randn(1, 1, 256, 256)
-    predict = model(du)
-    print(predict.shape)
-    
-=======
         orig_size = x.shape[2:]
         
         # --- Encoder ---
@@ -355,4 +323,3 @@ class SegmentatorCoronarePlusPlus(nn.Module):
     def _up(self, x, size):
         """Helper for simple bilinear upsampling to target size"""
         return F.interpolate(x, size=size[2:], mode='bilinear', align_corners=False)
->>>>>>> 2d5c4c9 (feat: Update DINO configuration and add new training script)
