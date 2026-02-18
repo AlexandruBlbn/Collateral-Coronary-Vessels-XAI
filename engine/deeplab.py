@@ -113,7 +113,16 @@ class TransformsWrapper():
             angle = torch.randint(-15, 15, (1,)).item()
             img = tf.rotate(img, angle)
             mask = tf.rotate(mask, angle)
-        
+            
+        if self.mode == "lejepa":
+                img = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomApply(transforms.RandomVerticalFlip()(img), p=0.5),
+                transforms.RandomApply(transforms.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0))(img), p=0.2),
+                transforms.RandomApply(transforms.RandomSolarize(threshold=0.5)(img), p=0.2)])
+                
+            
+
         img = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(np.array(img))
         img = tf.to_tensor(img)
         img = tf.normalize(img, [0.5], [0.5])

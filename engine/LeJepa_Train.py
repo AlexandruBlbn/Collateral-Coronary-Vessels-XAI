@@ -6,379 +6,259 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+from torch.optim.lr_scheduler import  CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 import torchvision.transforms as transforms
 from torchmetrics.classification import BinaryF1Score
-from PIL import Image  
-
+import torchvision.transforms.functional  as tf
+from PIL import Image 
+import timm as timm
+import torchvision
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from data.dataloader import ArcadeDataset
-from zoo.backbones import get_backbone
-from zoo.lejepa_components.lejepa_loss import SIGReg
 from utils.logger import TensorboardLogger
+import segmentation_models_pytorch as smp
+import cv2
+from monai.networks.nets.basic_unet import BasicUNet
+from torchinfo import summary
+from torchvision.ops import MLP
 
-import torch.multiprocessing
-torch.multiprocessing.set_sharing_strategy('file_system')
+import monai
 
-# --- DEFAULT PATHS (Fallback) ---
-DEFAULT_JSON_PATH = "/workspace/Collateral-Coronary-Vessels-XAI/data/ARCADE/processed/dataset.json"
-DEFAULT_ROOT_DIR = "/workspace/Collateral-Coronary-Vessels-XAI"
 
-# --- WRAPPER PENTRU PRE-ANTRENARE (IGNORA LABELURILE) ---
-class PretrainWrapper(Dataset):
-    def __init__(self, base_dataset):
-        self.base_dataset = base_dataset
+from torchmetrics.classification import (
+    BinaryJaccardIndex, 
+    BinaryF1Score
+)
 
-    def __len__(self):
-        return len(self.base_dataset)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, '..'))
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
-    def __getitem__(self, idx):
-        views, _ = self.base_dataset[idx]
-        return views
+from zoo.models import SegmentatorCoronare, SegmentatorCoronarePlusPlus
+from data.dataloader import ArcadeDataset
+from torch.utils.tensorboard import SummaryWriter
+from utils.helpers import set_seed
+import numpy as np
 
-# --- WRAPPER NOU PENTRU LINEAR PROBE (INCARCA SI PROCESEAZA MASTILE) ---
-class LinearProbeWrapper(Dataset):
-    def __init__(self, base_dataset, input_size, root_dir):
-        self.base_dataset = base_dataset
-        self.root_dir = root_dir
-        self.input_size = input_size
-        
-        # Transformari pentru imagine (Bicubic pentru calitate)
-        self.img_transform = transforms.Compose([
-            transforms.Resize((input_size, input_size), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
-        ])
-        
-        # Transformari pentru masca (Nearest Neighbor pentru a pastra clasele distincte, apoi Binarizare)
-        # Nota: facem resize manual in getitem pentru masca
-        self.to_tensor = transforms.ToTensor()
+#------------------------
+from deeplab import TransformsWrapper
 
-    def __len__(self):
-        return len(self.base_dataset)
+#------------------------
 
-    def __getitem__(self, idx):
-        # ArcadeDataset returneaza (img_pil, cale_relativa_string)
-        img, label_path = self.base_dataset[idx]
-        
-        # 1. Procesare Imagine
-        img_tensor = self.img_transform(img)
-        
-        # 2. Procesare Masca
-        full_label_path = os.path.join(self.root_dir, label_path)
-        mask = Image.open(full_label_path).convert('L')
-        
-        # Resize Nearest pentru masca
-        mask = mask.resize((self.input_size, self.input_size), resample=Image.NEAREST)
-        
-        mask_tensor = self.to_tensor(mask)
-        mask_tensor = (mask_tensor > 0).float() # Binarizare (0 sau 1)
-        
-        return img_tensor, mask_tensor
+img_size = 224
+batch_size = 20
+labda = 0.04
 
-# --- LEJEPA COMPONENTS ---
-class LeJEPAProjector(nn.Module):
-    def __init__(self, in_dim, hidden_dim=2048, proj_dim=128):
+train_base = ArcadeDataset(split='train',mode='pretrain', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+train_ds = TransformsWrapper(train_base, input_size=img_size, mode='lejepa')
+train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True)
+
+test_base = ArcadeDataset(split='train', mode='syntax', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+test_ds = TransformsWrapper(test_base, input_size=img_size, mode='train')
+test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True)
+
+val_base = ArcadeDataset(split='validation', mode='syntax', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+val_ds = TransformsWrapper(val_base, input_size=img_size, mode='validation')
+val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4, persistent_workers=True)
+
+
+class LeJepaModel(nn.Module):
+    def __init__(self, proj_dim=128):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, proj_dim),
+        self.backbone = timm.create_model('coatnet_1_rw_224', pretrained=False, in_chans=1, num_classes=0, global_pool='')
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.proj = MLP(768, [512, proj_dim], norm_layer=nn.LayerNorm)
+    
+    def forward(self, x):
+        features_map = self.backbone(x)
+        emb_vec = self.pool(features_map).flatten(1)
+        p_loss = self.proj(emb_vec)
+        return features_map, p_loss
+
+# x = torch.randn(2, 4, 1, 224, 224).to('cuda')
+# model = LeJepaModel().to('cuda')
+# emb, proj = model(x)
+# print("Emb shape:", emb.shape)  # Expected: (N*V, 512)
+# print("Proj shape:", proj.shape)  # Expected: (V, N, proj_dim)
+
+
+class SIGReg(torch.nn.Module):
+    def __init__(self, knots=17):
+        super().__init__()
+        t = torch.linspace(0, 3, knots, dtype=torch.float32)
+        dt = 3 / (knots - 1)
+        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
+        weights[[0, -1]] = dt
+        window = torch.exp(-t.square() / 2.0)
+        self.register_buffer("t", t)
+        self.register_buffer("phi", window)
+        self.register_buffer("weights", weights * window)
+
+    def forward(self, proj):
+        A = torch.randn(proj.size(-1), 256, device="cuda")
+        A = A.div_(A.norm(p=2, dim=0))
+        x_t = (proj @ A).unsqueeze(-1) * self.t
+        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
+        statistic = (err @ self.weights) * proj.size(-2)
+        return statistic.mean()
+
+sigreg = SIGReg().to('cuda')
+dice_loss = smp.losses.DiceLoss(mode='binary')
+f1_metric = BinaryF1Score().to('cuda')
+iou = BinaryJaccardIndex().to('cuda')
+scaler = torch.amp.GradScaler()
+
+# probe = nn.Sequential(
+#     nn.LayerNorm(224),
+#     nn.Conv2d(256, 1, kernel_size=1)
+# ).to('cuda')
+
+class ProbeHead(nn.Module):
+    def __init__(self, in_channels, num_classes=1):
+        super().__init__()
+        self.project = nn.Sequential( 
+            nn.Conv2d(in_channels, 256, kernel_size=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(inplace=True)
         )
-
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False), #14
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(inplace=True),
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=False), #28
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(inplace=True),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=False),#56
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(inplace=True),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1, bias=False),#112
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(inplace=True),
+            nn.ConvTranspose2d(16,16, kernel_size=4, stride=2, padding=1, bias=False), #224
+            nn.BatchNorm2d(16),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(16, num_classes, kernel_size=1)
+        )
     def forward(self, x):
-        return self.net(x)
+        x = self.project(x)
+        x = self.decoder(x)
+        return x
 
-class LeJEPAEncoder(nn.Module):
-    def __init__(self, backbone_name='swinv2_tiny_window16_256', in_channels=1,
-                 proj_dim=128, proj_hidden_dim=2048, input_size=256):
+model = LeJepaModel().to('cuda')
+probe = ProbeHead(in_channels=768, num_classes=1).to('cuda')
+lr1 = {"params": probe.parameters(), "lr": 1e-4, "weight_decay": 5e-2}
+lr2 = {"params": model.parameters(), "lr": 1e-5, "weight_decay": 5e-2}
+opt = torch.optim.AdamW([lr1, lr2])
+scheduler1 = LinearLR(opt, start_factor=0.1, end_factor=0.1, total_iters=20)
+scheduler2 = CosineAnnealingLR(opt, T_max=100 - 5, eta_min=1e-6)
+scheduler3 = SequentialLR(opt, schedulers=[scheduler1, scheduler2], milestones=[20])
+v=4
+
+writer = SummaryWriter(log_dir=f"runs/LeJepa_coatnet_1_rw_224")
+
+# for batch_idx in val_loader:
+#     print(batch_idx[0].shape)  
+#     break
+
+augment = transforms.Compose([
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomVerticalFlip(p=0.5),
+    transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+    # Important pentru angiografii: puțin zgomot sau blur
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
+])
+
+class augmentariLeJepa(nn.Module):
+    def __init__(self, img_size=224, local_size=112):
         super().__init__()
-        self.backbone = get_backbone(model_name=backbone_name, in_channels=in_channels, pretrained=False)
-
-        with torch.no_grad():
-            dummy = torch.randn(1, in_channels, input_size, input_size)
-            feats = self.backbone(dummy)
-            if isinstance(feats, (list, tuple)):
-                feats = feats[-1]
-            self.feat_dim = feats.shape[1]
-
-        self.projector = LeJEPAProjector(self.feat_dim, proj_hidden_dim, proj_dim)
-
-    def _pool(self, feat):
-        if isinstance(feat, (list, tuple)):
-            feat = feat[-1]
-        if feat.dim() == 4:
-            return feat.mean(dim=[-2, -1])
-        if feat.dim() == 3:
-            return feat.mean(dim=1)
-        return feat
-
-    def forward(self, x):
-        B, V = x.shape[:2]
-        flat = x.flatten(0, 1)
-        feats = self.backbone(flat)
-        emb = self._pool(feats)
-        proj = self.projector(emb)
-        proj = proj.reshape(B, V, -1).permute(1, 0, 2)
-        return emb, proj
-
-class MultiViewAugmentation:
-    def __init__(self, input_size=256, n_views=4, scale=(0.3, 1.0)):
-        self.n_views = n_views
-        self.transform = transforms.Compose([
-            transforms.RandomResizedCrop(input_size, scale=scale, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.0, 0.0)], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([transforms.GaussianBlur(7, (0.1, 2.0))], p=0.5),
-            transforms.RandomApply([transforms.RandomSolarize(128)], p=0.2),
-            transforms.Grayscale(num_output_channels=1),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5]),
+        self.img_size = img_size
+        self.local_size = local_size
+        
+        self.Global_Crops = transforms.RandomResizedCrop(img_size, scale=(0.7, 1.0), interpolation=transforms.InterpolationMode.BICUBIC)
+        self.Local_Crops = transforms.Compose([
+            transforms.RandomResizedCrop(local_size, scale=(0.05, 0.6), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC)
         ])
 
-    def __call__(self, image):
-        return torch.stack([self.transform(image) for _ in range(self.n_views)])
-
-class LinearProbeSegmenter(nn.Module):
-    def __init__(self, backbone, in_channels=1, num_classes=1, input_size=256):
-        super().__init__()
-        self.backbone = backbone
+    def __call__(self, img):
+            crops = []
+            for _ in range(2):
+                crops.append(self.Global_Crops(img))
+            for _ in range(3):
+                crops.append(self.Local_Crops(img))
+            return crops
         
-        with torch.no_grad():
-            dummy = torch.randn(1, in_channels, input_size, input_size)
-            feats = self.backbone(dummy)
-            if isinstance(feats, (list, tuple)):
-                feats = feats[-1]
-            out_channels = feats.shape[1]
 
-        self.head = nn.Conv2d(out_channels, num_classes, kernel_size=1)
-
-    def forward(self, x):
-        with torch.no_grad():
-            features = self.backbone(x)
-            if isinstance(features, (list, tuple)):
-                features = features[-1]
+augment = augmentariLeJepa()    
         
-        logits_small = self.head(features)
-        logits = F.interpolate(logits_small, size=x.shape[-2:], mode='bilinear', align_corners=False)
-        return logits
+V=5
 
-def run_linear_evaluation(backbone_state_dict, config, device):
-    # Paths
-    json_path = config["data"].get("json_path", DEFAULT_JSON_PATH)
-    root_dir = config["data"].get("root_dir", DEFAULT_ROOT_DIR)
-    input_size = config["model"]["input_size"]
-
-    # 1. Instantiem Dataset-urile de baza (fara transform, ca il face wrapper-ul)
-    train_base = ArcadeDataset(json_path, split='train', transform=None, root_dir=root_dir)
-    val_base = ArcadeDataset(json_path, split='validation', transform=None, root_dir=root_dir)
+for epoch in range(300):
+    model.train(), probe.train()
+    pbar = tqdm(enumerate(test_loader),total=len(test_loader), desc=f"Epoch {epoch+1}/300")
     
-    # 2. Folosim Wrapper-ul care incarca mastile corect
-    train_ds = LinearProbeWrapper(train_base, input_size, root_dir)
-    val_ds = LinearProbeWrapper(val_base, input_size, root_dir)
-    
-    # 3. DataLoaders
-    train_loader = DataLoader(train_ds, batch_size=config["data"]["batch_size"], shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=config["data"]["batch_size"], shuffle=False, num_workers=2)
-    
-    # 4. Model Setup
-    backbone = get_backbone(config["model"]["backbone"], in_channels=config["data"]["in_channels"], pretrained=False)
-    backbone.load_state_dict(backbone_state_dict, strict=False)
-    
-    probe_model = LinearProbeSegmenter(backbone, in_channels=config["data"]["in_channels"], input_size=input_size).to(device)
-    probe_model.backbone.eval()
-    
-    optimizer = optim.AdamW(probe_model.head.parameters(), lr=1e-3)
-    criterion = nn.BCEWithLogitsLoss()
-    metric = BinaryF1Score().to(device)
-    
-    # 5. Training Loop (5 epochs)
-    for _ in range(5):
-        probe_model.head.train()
-        for imgs, masks in train_loader:
-            imgs, masks = imgs.to(device), masks.to(device)
-            # masks e deja tensor float din wrapper
-            
-            optimizer.zero_grad()
-            logits = probe_model(imgs)
-            loss = criterion(logits, masks)
-            loss.backward()
-            optimizer.step()
-            
-    # 6. Validation Loop
-    probe_model.eval()
-    val_f1 = 0.0
-    steps = 0
-    with torch.no_grad():
-        for imgs, masks in val_loader:
-            imgs, masks = imgs.to(device), masks.to(device)
-            
-            logits = probe_model(imgs)
-            probs = torch.sigmoid(logits)
-            val_f1 += metric(probs, masks).item()
-            steps += 1
-            
-    return val_f1 / steps if steps > 0 else 0.0
-
-def train_one_epoch(model, sigreg, dataloader, optimizer, scheduler, device, epoch, logger, scaler, lamb):
-    model.train()
-    running_lejepa = 0.0
-    running_sigreg = 0.0
-    running_inv = 0.0
-
-    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
-    
-    for step, views in enumerate(progress_bar):
-        views = views.to(device, non_blocking=True)  
-
-        optimizer.zero_grad()
+    for batch_idx, (img, mask) in pbar:
+        img_device = img.to('cuda')
+        mask = mask.to('cuda')
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            emb, proj = model(views)
-            inv_loss = (proj.mean(0, keepdim=True) - proj).square().mean()
-            sigreg_loss = sigreg(proj)
-            lejepa_loss = sigreg_loss * lamb + inv_loss * (1 - lamb)
-
-        scaler.scale(lejepa_loss).backward()
-        scaler.step(optimizer)
+            features_original, _ = model(img_device)
+            pred_probe = probe(features_original)
+            probe_loss = dice_loss(pred_probe, mask)
+            crops = augment(img_device) 
+            global_crops = torch.cat(crops[:2], dim=0) 
+            local_crops = torch.cat(crops[2:], dim=0)
+            _, p_loss_global = model(global_crops)
+            _, p_loss_local = model(local_crops)
+            p_loss_all = torch.cat([p_loss_global, p_loss_local], dim=0)
+            current_bs = img.size(0)
+            proj_views = p_loss_all.view(V, current_bs, -1)
+            proj_mean = proj_views.mean(dim=0)
+            inv_loss = (proj_mean - proj_views).square().mean()
+            sigreg_loss = sigreg(proj_views)
+            lejepa_loss = sigreg_loss * labda + inv_loss * (1-labda)
+            loss = lejepa_loss + probe_loss
+            
+        opt.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.step(opt)
         scaler.update()
-        scheduler.step()
-
-        running_lejepa += lejepa_loss.item()
-        running_sigreg += sigreg_loss.item()
-        running_inv += inv_loss.item()
-        
-        progress_bar.set_postfix({
-            "loss": f"{lejepa_loss.item():.4f}",
-            "inv": f"{inv_loss.item():.4f}",
-            "reg": f"{sigreg_loss.item():.4f}"
+        scheduler3.step()
+        pbar.set_postfix({
+            "LeJepa Loss": lejepa_loss.item(),
+            "Probe Loss": probe_loss.item(),
+            "SIGReg Loss": sigreg_loss.item(),
+            "Inv Loss": inv_loss.item(),
         })
-
-        global_step = epoch * len(dataloader) + step
-        logger.log_scalar("Train/Step_LeJEPA", lejepa_loss.item(), global_step)
-        logger.log_scalar("Train/Step_SIGReg", sigreg_loss.item(), global_step)
-        logger.log_scalar("Train/Step_Invariance", inv_loss.item(), global_step)
-        logger.log_scalar("Train/LR", optimizer.param_groups[0]["lr"], global_step)
-
-    n = len(dataloader)
-    return running_lejepa / n, running_sigreg / n, running_inv / n
-
-def main():
-    config_path = "config/lejepa_config.yaml"
-    if not os.path.exists(config_path):
-        config_path = os.path.join(os.path.dirname(__file__), "..", "config", "lejepa_config.yaml")
-
-    if not os.path.exists(config_path):
-        print(f"Config file not found: {config_path}")
-        return
-
-    with open(config_path, "r") as f:
-        base_config = yaml.safe_load(f)
-
-    backbone_name = base_config["model"]["backbone"]
-    device = torch.device(base_config["system"]["device"] if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(base_config["system"]["seed"])
-
-    print(f"Pretraining Backbone: {backbone_name}")
-
-    config = base_config.copy()
-    config["experiment_name"] = f"lejepa_pretrain_{backbone_name}"
-
-    logger = TensorboardLogger(log_dir="runs", experiment_name=config["experiment_name"])
-
-    transform = MultiViewAugmentation(
-        input_size=config["model"]["input_size"],
-        n_views=config["data"]["n_views"],
-        scale=(config["data"]["global_scale_min"], config["data"]["global_scale_max"]),
-    )
-
-    # --- FALLBACK PATHS ---
-    json_path = config["data"].get("json_path", DEFAULT_JSON_PATH)
-    root_dir = config["data"].get("root_dir", DEFAULT_ROOT_DIR)
-
-    base_dataset = ArcadeDataset(
-        json_path=json_path, split='train', transform=transform,
-        mode='pretrain', root_dir=root_dir
-    )
-    
-    wrapped_dataset = PretrainWrapper(base_dataset)
-
-    train_loader = DataLoader(
-        wrapped_dataset,
-        batch_size=config["data"]["batch_size"],
-        shuffle=True,
-        num_workers=config["data"]["num_workers"],
-        pin_memory=True,
-        drop_last=True,
-    )
-
-    model = LeJEPAEncoder(
-        backbone_name=backbone_name,
-        in_channels=config["data"]["in_channels"],
-        proj_dim=config["model"]["proj_dim"],
-        proj_hidden_dim=config["model"]["proj_hidden_dim"],
-        input_size=config["model"]["input_size"]
-    ).to(device)
-
-    sigreg = SIGReg(knots=config["lejepa"]["sigreg_knots"]).to(device)
-    lamb = config["lejepa"]["lamb"]
-
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=float(config["optimizer"]["lr"]),
-        weight_decay=config["optimizer"]["weight_decay"],
-    )
-    scaler = torch.amp.GradScaler('cuda')
-
-    epochs = config["optimizer"]["epochs"]
-    warmup_epochs = config["optimizer"].get("warmup_epochs", 10)
-    steps_per_epoch = len(train_loader)
-    warmup_steps = warmup_epochs * steps_per_epoch
-    total_steps = epochs * steps_per_epoch
-
-    s1 = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
-    s2 = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=float(config["optimizer"]["lr"]) / 1000)
-    scheduler = SequentialLR(optimizer, schedulers=[s1, s2], milestones=[warmup_steps])
-
-    save_dir = os.path.join(config["system"]["save_dir"], config["experiment_name"])
-    os.makedirs(save_dir, exist_ok=True)
-    best_loss = float('inf')
-
-    for epoch in range(epochs):
-        lejepa_loss, sigreg_loss, inv_loss = train_one_epoch(
-            model, sigreg, train_loader, optimizer, scheduler,
-            device, epoch, logger, scaler, lamb
-        )
+        writer.add_scalar("Train/LeJepa Loss", lejepa_loss.item(), epoch * len(test_loader) + batch_idx)
+        writer.add_scalar("Train/F1 Score", f1_metric(pred_probe, mask).item(), epoch * len(test_loader) + batch_idx)
+        writer.add_scalar("Train/SIGReg Loss", sigreg_loss.item(), epoch * len(test_loader) + batch_idx)
+        writer.add_scalar("Train/Inv Loss", inv_loss.item(), epoch * len(test_loader) + batch_idx)
         
-        logger.log_scalar("Train/Epoch_LeJEPA", lejepa_loss, epoch)
-        logger.log_scalar("Train/Epoch_SIGReg", sigreg_loss, epoch)
-        logger.log_scalar("Train/Epoch_Invariance", inv_loss, epoch)
+        
+    model.eval(), probe.eval()
+    f1=0
+    pbar = tqdm(enumerate(val_loader),total = len(val_loader), desc=f"Validation Epoch {epoch+1}/300")
+    with torch.no_grad():
+            with torch.inference_mode():
+                for batch_idx, (img, mask) in pbar:
+                    img = img.to('cuda')
+                    mask = mask.to('cuda')
+                    features_maps, p_loss = model(img)
+                    pred_probe = probe(features_maps)
+                    f1 += f1_metric(pred_probe, mask).item()
+                    if batch_idx == 0:
+                        img = img * 0.5 + 0.5
+                        num_samples = min(4, img.size(0))
+                        grid_images = []
+                        for i in range(num_samples):
+                            grid_images.append(img[i].cpu())
+                            grid_images.append(pred_probe[i].float().cpu())
+                            grid_images.append(mask[i].float().cpu())
+                        grid = torchvision.utils.make_grid(grid_images, nrow=3, padding=2)
+                        writer.add_image("Val Predictions", grid, epoch)
+                f1 = f1 /len(val_loader)
+                writer.add_scalar("Validation/F1 Score", f1, epoch)
 
-        print(f"Ep {epoch+1}/{epochs} | Loss: {lejepa_loss:.4f} (Inv: {inv_loss:.4f}, Reg: {sigreg_loss:.4f})")
 
-        if (epoch + 1) % 10 == 0:
-            torch.save(model.backbone.state_dict(), os.path.join(save_dir, "last_backbone.pth"))
-
-        if lejepa_loss < best_loss:
-            best_loss = lejepa_loss
-            torch.save(model.backbone.state_dict(), os.path.join(save_dir, "best_backbone.pth"))
-
-        if (epoch + 1) % 50 == 0:
-            print(f"Running Linear Probe at epoch {epoch+1}...")
-            f1_score = run_linear_evaluation(model.backbone.state_dict(), config, device)
-            logger.log_scalar("Probe/Validation_F1", f1_score, epoch)
-            print(f"Linear Probe F1: {f1_score:.4f}")
-            torch.save(model.backbone.state_dict(), os.path.join(save_dir, f"checkpoint_ep{epoch+1}_f1_{f1_score:.2f}.pth"))
-
-    logger.close()
-    print("Training finished.")
-
-if __name__ == "__main__":
-    main()
-    
-    
