@@ -194,7 +194,9 @@ class augmentariLeJepa(nn.Module):
 augment = augmentariLeJepa()    
         
 V=5
-
+best_f1 = 0
+save_dir = "checkpoints/LeJepa_coatnet"
+os.makedirs(save_dir, exist_ok=True)
 for epoch in range(300):
     model.train(), probe.train()
     pbar = tqdm(enumerate(test_loader),total=len(test_loader), desc=f"Epoch {epoch+1}/300")
@@ -260,5 +262,20 @@ for epoch in range(300):
                         writer.add_image("Val Predictions", grid, epoch)
                 f1 = f1 /len(val_loader)
                 writer.add_scalar("Validation/F1 Score", f1, epoch)
-
-
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'probe_state_dict': probe.state_dict(),
+                    'optimizer_state_dict': opt.state_dict(),
+                    'scheduler_state_dict': scheduler3.state_dict(),
+                    'best_f1': best_f1,
+                }
+                torch.save(checkpoint, os.path.join(save_dir, "last_model.pth"))
+                if f1 > best_f1:
+                    best_f1 = f1
+                    torch.save(checkpoint, os.path.join(save_dir, "best_model.pth"))
+                    print(f"--- Model salvat la epoca {epoch+1} cu F1: {best_f1:.4f} ---")
+                    backbone_path = os.path.join(save_dir, f"best_backbone_epoch_{epoch+1}.pth")
+                    torch.save(model.backbone.state_dict(), backbone_path)
+                    decoder_path = os.path.join(save_dir, f"best_probe_epoch_{epoch+1}.pth")
+                    torch.save(probe.state_dict(), decoder_path)
