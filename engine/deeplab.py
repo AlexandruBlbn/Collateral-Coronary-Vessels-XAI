@@ -45,7 +45,7 @@ import numpy as np
 
 set_seed(42)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = smp.Unet(encoder_name="tu-focalnet_small_srf", encoder_weights=None,in_channels=1, classes=1, activation=None).to(device)
+model = smp.Unet(encoder_name="tu-coatnet_1_rw_224", encoder_weights=None,in_channels=1, classes=1, activation=None).to(device)
 Name = model.__class__.__name__ + "_" + model.encoder.name #decoder-encoder
 #---------------------
 batch_size = 16
