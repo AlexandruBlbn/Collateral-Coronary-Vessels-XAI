@@ -1,5 +1,0 @@
-batch_size: 16
-epochs: 100
-learning_rate: 0.0001
-min_lr: 1.0e-06
-model: Unet_coatnet_1_rw_224

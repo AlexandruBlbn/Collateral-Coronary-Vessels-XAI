@@ -45,7 +45,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 img_size = 256
 batch_size = 8
 epochs = 100
-lr = 1e-4
+lr = 5e-4
 loss_fn = smp.losses.TverskyLoss(mode='binary', log_loss=True, from_logits=True)
 f1_metric = BinaryF1Score().to(device)
 scaler = torch.amp.GradScaler()
@@ -88,15 +88,16 @@ class TransformsWrapper():
         if len(img_np.shape) == 3:
             img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
             
-        img_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(img_np)
+        # img_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(img_np)
         
-        frangi = FrangiFilter(img_clahe, 256)
+        frangi = FrangiFilter(img_np, 256)
         frangi_tensor = torch.from_numpy(frangi).unsqueeze(0).float() 
         
-        img_tensor = tf.to_tensor(img_clahe)
+        img_tensor = tf.to_tensor(img_np)
         img_tensor = tf.normalize(img_tensor, [0.5], [0.5])
         
-        combined_img = torch.cat([img_tensor, frangi_tensor], dim=0)
+        combined_img = img_tensor
+        # combined_img = torch.cat([img_tensor, frangi_tensor], dim=0)
         mask = tf.to_tensor(mask)
 
         return combined_img, mask
@@ -113,12 +114,40 @@ train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_wor
 val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=16, persistent_workers=True)
 test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=16, persistent_workers=True)
 
-model = UNeXt_S(in_channels=2, num_classes=1).cuda()
+
+#----------
+
+from monai.networks.nets import SwinUNETR
+# model = SwinUNETR( 
+#     in_channels=2,     
+#     out_channels=1,     
+#     spatial_dims=2,       
+#     feature_size=24,     
+#     use_checkpoint=True  
+# ).cuda()
+#---------
+
+model = smp.Unet(
+    encoder_name='tu-convnextv2_tiny',
+    encoder_weights=None,
+    in_channels=1,
+    classes=1
+)
+
+#relu - leaky, batchnorm - instance norm
+for k, v in model.named_children():
+    if isinstance(v, nn.ReLU):
+        setattr(model, k, nn.LeakyReLU(inplace=True))
+    elif isinstance(v, nn.BatchNorm2d):
+        setattr(model, k, nn.InstanceNorm2d(v.num_features, affine=True))
+        
+model = model.cuda()
 
 optimiser = optim.AdamW(model.parameters(), lr=lr)
-criterion = smp.losses.TverskyLoss(mode='binary', log_loss=True, from_logits=True)
+criterion = smp.losses.FocalLoss(mode='binary', alpha=0.5, gamma=1)
+criterion2 = smp.losses.TverskyLoss(mode='binary', log_loss=True, from_logits=True)
 scheduler = CosineAnnealingLR(optimiser, T_max=epochs)
-writer = SummaryWriter(log_dir='runs/UNeXt_S')
+writer = SummaryWriter(log_dir='runs/ConvNext_UNET')
 
 def train_epoch(model, dataloader, criterion, optimiser, f1_metric, epoch):
     model.train()
@@ -146,7 +175,7 @@ def validate_epoch(model, dataloader, criterion, f1_metric, epoch):
         for batch_idx, (images, masks) in pbar:
             images, masks = images.cuda(), masks.cuda()
             output = model(images)
-            loss = criterion(output, masks)
+            loss = criterion(output, masks) 
             val_loss += loss.item()
             val_f1 += f1_metric(output.sigmoid(), masks.int()).item()
             pbar.set_postfix({'val_loss': val_loss / (batch_idx + 1), 'val_f1': val_f1 / (batch_idx + 1)})
@@ -184,9 +213,23 @@ def test_model(model, dataloader, f1_metric, tb_writer):
     return test_f1
     
 if __name__ == '__main__':
-    check_path = 'checkpoints/UNeXt_S_Frangi'
+    encoder_name = encoder_name = getattr(model, 'encoder_name', None) or getattr(model, 'encoder', None)
+    check_path = 'checkpoints/Convnext_unet'
     os.makedirs(check_path, exist_ok=True)
     best_val_f1 = 0.0
+    
+    with open(os.path.join(check_path, 'config.yaml'), 'w') as f:
+        yaml.dump({
+            'in_channels': 1,
+            'classes': 1,
+            'decoder_attention_type': 'scse',
+            'optimizer': 'AdamW',
+            'learning_rate': lr,
+            'loss_function': "Focal Loss",
+            'scheduler': 'CosineAnnealingLR',
+            'epochs': epochs,
+            'batch_size': batch_size,
+        }, f)
 
     for epoch in range(epochs):
         train_epoch(model, train_loader, criterion, optimiser, f1_metric, epoch)
@@ -207,10 +250,8 @@ if __name__ == '__main__':
         torch.save(checkpoint, os.path.join(check_path, f'last_checkpoint.pth'))
         if is_best:
             torch.save(checkpoint, os.path.join(check_path, 'best_model.pth'))
-
-        print(f"Epoch {epoch+1}: best F1 so far {best_val_f1:.4f}")
         scheduler.step()
 
     final_test_f1 = test_model(model, test_loader, f1_metric, tb_writer=writer)
-    writer.add_scalar('Test/Final_F1', final_test_f1, epochs)
+    writer.add_scalar('Test F1', final_test_f1, epochs)
     print(f"Final Test F1: {final_test_f1:.4f}")

@@ -78,11 +78,10 @@ class LeJepaModel(nn.Module):
     def __init__(self, proj_dim=128):
         super().__init__()
         self.backbone = timm.create_model(
-            'coatnet_1_rw_224', 
+            'swinv2_tiny_window8_256', 
             pretrained=False, 
             in_chans=1, 
             features_only=True,
-            out_indices=(0, 1, 2, 3, 4)
         )
         feature_info = self.backbone.feature_info.channels()
         self.pool = nn.AdaptiveAvgPool2d(1)
@@ -129,6 +128,7 @@ class ProbeHeadUNet(nn.Module):
             nn.InstanceNorm2d(512),
             nn.LeakyReLU(inplace=True)
         )
+        
         self.dec4 = DecoderBlock(in_channels=512, skip_channels=encoder_channels[3], out_channels=256)
         self.dec3 = DecoderBlock(in_channels=256, skip_channels=encoder_channels[2], out_channels=128)
         self.dec2 = DecoderBlock(in_channels=128, skip_channels=encoder_channels[1], out_channels=64)
