@@ -102,18 +102,44 @@ class TransformsWrapper():
 
         return combined_img, mask
 
-train_base = ArcadeDataset(split='train', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
-val_base   = ArcadeDataset(split='validation', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
-test_base  = ArcadeDataset(split='test', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+# train_base = ArcadeDataset(split='train', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+# val_base   = ArcadeDataset(split='validation', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+# test_base  = ArcadeDataset(split='test', transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
 
-train_ds = TransformsWrapper(train_base, input_size=img_size, mode='train')
-val_ds   = TransformsWrapper(val_base, input_size=img_size, mode='val')
-test_ds  = TransformsWrapper(test_base, input_size=img_size, mode='val')
+# train_ds = TransformsWrapper(train_base, input_size=img_size, mode='train')
+# val_ds   = TransformsWrapper(val_base, input_size=img_size, mode='val')
+# test_ds  = TransformsWrapper(test_base, input_size=img_size, mode='val')
 
-train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=16, persistent_workers=True)
-val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=16, persistent_workers=True)
-test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=16, persistent_workers=True)
+# train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=16, persistent_workers=True)
+# val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=16, persistent_workers=True)
+# test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=16, persistent_workers=True)
 
+
+def loader(img_size, batch_size, split='train'):
+    """_returneaza direct dataloaderii_
+
+    Parametrii:
+        img_size (_int_): _Dimensiunea imaginilor_
+        batch_size (_int_): _batchsize_
+        split (_str_): _Split pentru datalaoder_. Tipuri: train, validation, test.
+
+    Returns:
+        _dataloader_: => _Dataloader pentru split-ul specificat_"""
+        
+    base = ArcadeDataset(split=split, transform=None, root_dir='.', json_path='data/ARCADE/processed/dataset.json')
+    ds = TransformsWrapper(base, input_size=img_size, mode=split)
+    return DataLoader(ds, batch_size=batch_size, shuffle=(split=='train'), num_workers=4, persistent_workers=True)
+        
+def configCrate(path, config):
+    """_Salveaza configuratia intr-un fisier yaml_
+
+    Parametrii:
+        path (_str_): _Calea catre fisierul yaml_
+        config (_dict_): _Dictionar cu configuratia_
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        yaml.dump(config, f)
 
 #----------
 
@@ -212,46 +238,48 @@ def test_model(model, dataloader, f1_metric, tb_writer):
     tb_writer.add_text("Test/F1", f"{test_f1:.4f}")
     return test_f1
     
-if __name__ == '__main__':
-    encoder_name = encoder_name = getattr(model, 'encoder_name', None) or getattr(model, 'encoder', None)
-    check_path = 'checkpoints/Convnext_unet_frangi'
-    os.makedirs(check_path, exist_ok=True)
-    best_val_f1 = 0.0
+# if __name__ == '__main__':
+#     encoder_name = encoder_name = getattr(model, 'encoder_name', None) or getattr(model, 'encoder', None)
+#     check_path = 'checkpoints/Convnext_unet_frangi'
+#     os.makedirs(check_path, exist_ok=True)
+#     best_val_f1 = 0.0
     
-    with open(os.path.join(check_path, 'config.yaml'), 'w') as f:
-        yaml.dump({
-            'in_channels': 2,
-            'classes': 1,
-            'decoder_attention_type': 'scse',
-            'optimizer': 'AdamW',
-            'learning_rate': lr,
-            'loss_function': "Focal Loss",
-            'scheduler': 'CosineAnnealingLR',
-            'epochs': epochs,
-            'batch_size': batch_size,
-        }, f)
+#     with open(os.path.join(check_path, 'config.yaml'), 'w') as f:
+#         yaml.dump({
+#             'in_channels': 2,
+#             'classes': 1,
+#             'decoder_attention_type': 'scse',
+#             'optimizer': 'AdamW',
+#             'learning_rate': lr,
+#             'loss_function': "Focal Loss",
+#             'scheduler': 'CosineAnnealingLR',
+#             'epochs': epochs,
+#             'batch_size': batch_size,
+#         }, f)
 
-    for epoch in range(epochs):
-        train_epoch(model, train_loader, criterion, optimiser, f1_metric, epoch)
-        avg_f1 = validate_epoch(model, val_loader, criterion, f1_metric, epoch)
+#     for epoch in range(epochs):
+#         train_epoch(model, train_loader, criterion, optimiser, f1_metric, epoch)
+#         avg_f1 = validate_epoch(model, val_loader, criterion, f1_metric, epoch)
 
-        is_best = avg_f1 > best_val_f1
-        if is_best:
-            best_val_f1 = avg_f1
+#         is_best = avg_f1 > best_val_f1
+#         if is_best:
+#             best_val_f1 = avg_f1
 
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimiser_state_dict': optimiser.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'best_val_f1': best_val_f1,
-        }
+#         checkpoint = {
+#             'epoch': epoch,
+#             'model_state_dict': model.state_dict(),
+#             'optimiser_state_dict': optimiser.state_dict(),
+#             'scheduler_state_dict': scheduler.state_dict(),
+#             'best_val_f1': best_val_f1,
+#         }
 
-        torch.save(checkpoint, os.path.join(check_path, f'last_checkpoint.pth'))
-        if is_best:
-            torch.save(checkpoint, os.path.join(check_path, 'best_model.pth'))
-        scheduler.step()
+#         torch.save(checkpoint, os.path.join(check_path, f'last_checkpoint.pth'))
+#         if is_best:
+#             torch.save(checkpoint, os.path.join(check_path, 'best_model.pth'))
+#         scheduler.step()
 
-    final_test_f1 = test_model(model, test_loader, f1_metric, tb_writer=writer)
-    writer.add_scalar('Test F1', final_test_f1, epochs)
-    print(f"Final Test F1: {final_test_f1:.4f}")
+#     final_test_f1 = test_model(model, test_loader, f1_metric, tb_writer=writer)
+#     writer.add_scalar('Test F1', final_test_f1, epochs)
+#     print(f"Final Test F1: {final_test_f1:.4f}")
+
+
