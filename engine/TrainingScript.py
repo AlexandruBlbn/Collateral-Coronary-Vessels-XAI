@@ -96,8 +96,8 @@ class TransformsWrapper():
         img_tensor = tf.to_tensor(img_np)
         img_tensor = tf.normalize(img_tensor, [0.5], [0.5])
         
-        combined_img = img_tensor
-        # combined_img = torch.cat([img_tensor, frangi_tensor], dim=0)
+        # combined_img = img_tensor
+        combined_img = torch.cat([img_tensor, frangi_tensor], dim=0)
         mask = tf.to_tensor(mask)
 
         return combined_img, mask
@@ -130,7 +130,7 @@ from monai.networks.nets import SwinUNETR
 model = smp.Unet(
     encoder_name='tu-convnextv2_tiny',
     encoder_weights=None,
-    in_channels=1,
+    in_channels=2,
     classes=1
 )
 
@@ -147,7 +147,7 @@ optimiser = optim.AdamW(model.parameters(), lr=lr)
 criterion = smp.losses.FocalLoss(mode='binary', alpha=0.5, gamma=1)
 criterion2 = smp.losses.TverskyLoss(mode='binary', log_loss=True, from_logits=True)
 scheduler = CosineAnnealingLR(optimiser, T_max=epochs)
-writer = SummaryWriter(log_dir='runs/ConvNext_UNET')
+writer = SummaryWriter(log_dir='runs/ConvNext_UNET_Frangi')
 
 def train_epoch(model, dataloader, criterion, optimiser, f1_metric, epoch):
     model.train()
@@ -214,13 +214,13 @@ def test_model(model, dataloader, f1_metric, tb_writer):
     
 if __name__ == '__main__':
     encoder_name = encoder_name = getattr(model, 'encoder_name', None) or getattr(model, 'encoder', None)
-    check_path = 'checkpoints/Convnext_unet'
+    check_path = 'checkpoints/Convnext_unet_frangi'
     os.makedirs(check_path, exist_ok=True)
     best_val_f1 = 0.0
     
     with open(os.path.join(check_path, 'config.yaml'), 'w') as f:
         yaml.dump({
-            'in_channels': 1,
+            'in_channels': 2,
             'classes': 1,
             'decoder_attention_type': 'scse',
             'optimizer': 'AdamW',
