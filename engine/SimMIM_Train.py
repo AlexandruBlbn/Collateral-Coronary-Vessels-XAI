@@ -12,7 +12,7 @@ import torchvision.transforms as transforms
 import data.dataloader as dataloader
 from data.dataloader import ArcadeDataset
 from data.MIM import ArcadeDatasetMIM, MaskGenerator
-from utils.logger import TensorboardLogger
+
 from zoo.mim import SimMIM
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, logger, scaler):
