@@ -277,9 +277,9 @@ def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, si
             epochs_no_improve += 1
             print(f"No improvement for {epochs_no_improve} epochs.")
             
-        if epochs_no_improve >= pacience:
-            print(f"Early stopping triggered after {epoch+1} epochs.")
-            break
+        # if epochs_no_improve >= pacience:
+        #     print(f"Early stopping triggered after {epoch+1} epochs.")
+        #     break
 
 if __name__ == "__main__":
     config = {
@@ -295,12 +295,12 @@ if __name__ == "__main__":
             'lr_probe': 1e-4,
             'lr_model': 1e-5,
             'weight_decay': 5e-2,
-            'labda': 0.04,
+            'labda': 0.1,
             'warmup_epochs': 20,
         },
         'model': {
             'encoder_name': 'swinv2_tiny_window8_256',
-            'proj_dim': 256
+            'proj_dim': 512
         }
     }
     
