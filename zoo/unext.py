@@ -254,7 +254,7 @@ class UNeXt(nn.Module):
         return x
 
 
-def UNeXt_S(in_channels=1, num_classes=1, base_channels=32, depths=[3,3,3], mlp_ratio=4, drop_rate=0.2, attention=True, use_checkpoint=False):
+def UNeXt_S(in_channels=1, num_classes=1, base_channels=128, depths=[2,1,1], mlp_ratio=4, drop_rate=0, attention=True, use_checkpoint=False):
     return UNeXt(
         in_channels=in_channels,
         num_classes=num_classes,
@@ -268,5 +268,5 @@ def UNeXt_S(in_channels=1, num_classes=1, base_channels=32, depths=[3,3,3], mlp_
     
     
 if __name__ == "__main__":
-    model = UNeXt_S(in_channels=1, num_classes=1)
-    summary(model, input_size=(8, 1, 256, 256))
+    model = UNeXt_S(in_channels=2, num_classes=1)
+    summary(model, input_size=(8, 2, 256, 256))
