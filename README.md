@@ -1,4 +1,4 @@
-# Collateral Coronary Vessels Segmentation & XAI 🫀
+#Coronary Vessels Segmentation & XAI 🫀
 
 Acest repository conține un framework avansat de Deep Learning dedicat segmentării vaselor coronariene și a circulației colaterale din imagini de angiografie X-Ray. 
 Proiectul abordează segmentarea imaginilor medicale folosind paradigme de Self-Supervised Learning (SSL) de ultimă generație, urmate de Transfer Learning și Fine-Tuning pe arhitecturi moderne de Dense Prediction.
@@ -28,4 +28,4 @@ Sistemul necesită un mediu cu suport GPU (CUDA). Pentru a instala dependențele
 pip install -r engine/requirements.txt
 
 
-generat cu gepete because i was lazy
+generat cu gepete because i was lazy!!!!!!!!!
