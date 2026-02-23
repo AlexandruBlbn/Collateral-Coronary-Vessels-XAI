@@ -237,33 +237,67 @@ def validate_epoch(model, probe, dataloader, f1_metric, epoch, writer):
                     grid_images.append(mask[i].float().cpu())
                 grid = torchvision.utils.make_grid(grid_images, nrow=3, padding=2)
                 writer.add_image("Val/Predictions", grid, epoch)
-
         avg_f1 = val_f1 / len(dataloader)
         writer.add_scalar("Val/F1", avg_f1, epoch)
         print(f"Validation F1: {avg_f1:.4f}")
         return avg_f1
 
+def reload_checkpoint(checkpoint_path, model, probe, optimiser, scheduler, scaler, num_gpus):
+    if os.path.isfile(checkpoint_path):
+        print(f"=> Se încarcă checkpoint-ul '{checkpoint_path}'...")
+        checkpoint = torch.load(checkpoint_path, map_location='cuda')
+        
+        start_epoch = checkpoint['epoch'] + 1
+        best_f1 = checkpoint.get('best_f1', 0.0)
+        
+        if num_gpus > 1:
+            model.module.load_state_dict(checkpoint['model_state_dict'])
+            probe.module.load_state_dict(checkpoint['probe_state_dict'])
+        else:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            probe.load_state_dict(checkpoint['probe_state_dict'])
+            
+        optimiser.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            
+        print(f"=> Reluare cu succes de la epoca {start_epoch} (Best F1: {best_f1:.4f})")
+        return start_epoch, best_f1
+    else:
+        print(f"=> Niciun checkpoint găsit la '{checkpoint_path}'. Antrenarea începe de la zero.")
+        return 0, 0.0
+
+
 def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, augment, config, writer):
     checkpoint_dir = config['logging']['checkpoint_dir'].format(experiment_name=config['experiment_name'])
     os.makedirs(checkpoint_dir, exist_ok=True)
-    best_f1 = 0.0
     num_gpus = torch.cuda.device_count()
-    pacience = 200
+    pacience = 300
     epochs_no_improve = 0
 
-    for epoch in range(config['training']['epochs']):
+    last_model_path = os.path.join(checkpoint_dir, "last_model.pth")
+    
+    # 1. Încărcăm checkpoint-ul dacă există
+    start_epoch, best_f1 = reload_checkpoint(last_model_path, model, probe, optimiser, scheduler, scaler, num_gpus)
+
+    # 2. Începem bucla de la start_epoch
+    for epoch in range(start_epoch, config['training']['epochs']):
         train_epoch(model, probe, train_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, epoch, augment, config, writer)
         val_f1 = validate_epoch(model, probe, val_loader, f1_metric, epoch, writer)
         
+        # Salvăm starea completă (inclusiv scaler)
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.module.state_dict() if num_gpus > 1 else model.state_dict(),
             'probe_state_dict': probe.module.state_dict() if num_gpus > 1 else probe.state_dict(),
             'optimizer_state_dict': optimiser.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
+            'scaler_state_dict': scaler.state_dict(),
             'best_f1': best_f1,
         }
-        torch.save(checkpoint, os.path.join(checkpoint_dir, "last_model.pth"))
+        torch.save(checkpoint, last_model_path)
         
         if val_f1 > best_f1:
             best_f1 = val_f1
@@ -277,13 +311,51 @@ def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, si
             epochs_no_improve += 1
             print(f"No improvement for {epochs_no_improve} epochs.")
             
-        # if epochs_no_improve >= pacience:
-        #     print(f"Early stopping triggered after {epoch+1} epochs.")
-        #     break
+        if epochs_no_improve >= pacience:
+            print(f"Early stopping triggered after {epoch+1} epochs.")
+            break
+
+# def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, augment, config, writer):
+#     checkpoint_dir = config['logging']['checkpoint_dir'].format(experiment_name=config['experiment_name'])
+#     os.makedirs(checkpoint_dir, exist_ok=True)
+#     best_f1 = 0.0
+#     num_gpus = torch.cuda.device_count()
+#     pacience = 50
+#     epochs_no_improve = 0
+
+#     for epoch in range(config['training']['epochs']):
+#         train_epoch(model, probe, train_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, epoch, augment, config, writer)
+#         val_f1 = validate_epoch(model, probe, val_loader, f1_metric, epoch, writer)
+        
+#         checkpoint = {
+#             'epoch': epoch,
+#             'model_state_dict': model.module.state_dict() if num_gpus > 1 else model.state_dict(),
+#             'probe_state_dict': probe.module.state_dict() if num_gpus > 1 else probe.state_dict(),
+#             'optimizer_state_dict': optimiser.state_dict(),
+#             'scheduler_state_dict': scheduler.state_dict(),
+#             'best_f1': best_f1,
+#         }
+#         torch.save(checkpoint, os.path.join(checkpoint_dir, "last_model.pth"))
+        
+#         if val_f1 > best_f1:
+#             best_f1 = val_f1
+#             epochs_no_improve = 0
+#             torch.save(checkpoint, os.path.join(checkpoint_dir, "best_model.pth"))
+            
+#             backbone_to_save = model.module.backbone if num_gpus > 1 else model.backbone
+#             torch.save(backbone_to_save.state_dict(), os.path.join(checkpoint_dir, "best_backbone.pth"))
+#             print(f"--- Backbone & Model salvat la epoca {epoch+1} cu F1: {best_f1:.4f} ---")
+#         else:
+#             epochs_no_improve += 1
+#             print(f"No improvement for {epochs_no_improve} epochs.")
+            
+#         if epochs_no_improve >= pacience:
+#             print(f"Early stopping triggered after {epoch+1} epochs.")
+#             break
 
 if __name__ == "__main__":
     config = {
-        'experiment_name': 'Swin_v2_tiny_w8_256_lejepa_linear_probe',
+        'experiment_name': 'ConvNexTV2_Tiny_lejepa_linear_probe',
         'logging': {
             'log_dir': 'runs/{experiment_name}',
             'checkpoint_dir': 'checkpoints/{experiment_name}'
@@ -295,12 +367,12 @@ if __name__ == "__main__":
             'lr_probe': 1e-4,
             'lr_model': 1e-5,
             'weight_decay': 5e-2,
-            'labda': 0.1,
+            'labda': 0.04,
             'warmup_epochs': 20,
         },
         'model': {
-            'encoder_name': 'swinv2_tiny_window8_256',
-            'proj_dim': 512
+            'encoder_name': 'convnextv2_tiny',
+            'proj_dim': 256
         }
     }
     
