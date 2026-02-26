@@ -17,6 +17,7 @@ from torchmetrics.classification import BinaryF1Score
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import random
+import gc
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, '..'))
@@ -82,7 +83,8 @@ class LeJepaModel(nn.Module):
         super().__init__()
         self.backbone = timm.create_model(
             encoder_name, 
-            pretrained=False, 
+            pretrained=True,
+            encoder_weights='imagenet', 
             in_chans=1, 
             features_only=True,
         )
@@ -93,6 +95,7 @@ class LeJepaModel(nn.Module):
     def forward(self, x):
         features = list(self.backbone(x))
         for i in range(len(features)):
+            # Reparăm ordinea canalelor pentru modelele Transformer (SwinV2)
             if features[i].dim() == 4 and features[i].shape[-1] == self.channels_list[i]:
                 features[i] = features[i].permute(0, 3, 1, 2).contiguous()
         last_map = features[-1]
@@ -120,24 +123,27 @@ class SIGReg(torch.nn.Module):
         statistic = (err @ self.weights) * proj.size(-2)
         return statistic.mean()
 
-class MultiScaleLinearProbe(nn.Module):
-    def __init__(self, in_channels_list, probe_dim=256, num_classes=1):
+class StrictMultiScaleProbe(nn.Module):
+    def __init__(self, in_channels_list, bottleneck_dim=32, num_classes=1):
         super().__init__()
         self.probes = nn.ModuleList([
-            nn.Conv2d(c, probe_dim, kernel_size=1) for c in in_channels_list
+            nn.Conv2d(c, bottleneck_dim, kernel_size=1) for c in in_channels_list
         ])
-        self.fuse = nn.Conv2d(probe_dim * len(in_channels_list), num_classes, kernel_size=1)
+        self.fuse = nn.Sequential(
+            nn.Conv2d(bottleneck_dim * len(in_channels_list), bottleneck_dim * 2, kernel_size=1),
+            nn.BatchNorm2d(bottleneck_dim * 2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(bottleneck_dim * 2, num_classes, kernel_size=1)
+        )
 
     def forward(self, features, original_size):
         upscaled = []
         target_size = features[0].shape[2:]
-        
         for feat, probe_conv in zip(features, self.probes):
             p = probe_conv(feat)
             if p.shape[2:] != target_size:
                 p = F.interpolate(p, size=target_size, mode='bilinear', align_corners=False)
             upscaled.append(p)
-            
         out = torch.cat(upscaled, dim=1)
         out = self.fuse(out)
         out = F.interpolate(out, size=original_size, mode='bilinear', align_corners=False)
@@ -237,6 +243,7 @@ def validate_epoch(model, probe, dataloader, f1_metric, epoch, writer):
                     grid_images.append(mask[i].float().cpu())
                 grid = torchvision.utils.make_grid(grid_images, nrow=3, padding=2)
                 writer.add_image("Val/Predictions", grid, epoch)
+        
         avg_f1 = val_f1 / len(dataloader)
         writer.add_scalar("Val/F1", avg_f1, epoch)
         print(f"Validation F1: {avg_f1:.4f}")
@@ -269,7 +276,6 @@ def reload_checkpoint(checkpoint_path, model, probe, optimiser, scheduler, scale
         print(f"=> Niciun checkpoint găsit la '{checkpoint_path}'. Antrenarea începe de la zero.")
         return 0, 0.0
 
-
 def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, augment, config, writer):
     checkpoint_dir = config['logging']['checkpoint_dir'].format(experiment_name=config['experiment_name'])
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -278,16 +284,14 @@ def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, si
     epochs_no_improve = 0
 
     last_model_path = os.path.join(checkpoint_dir, "last_model.pth")
+    done_file_path = os.path.join(checkpoint_dir, "DONE")
     
-    # 1. Încărcăm checkpoint-ul dacă există
     start_epoch, best_f1 = reload_checkpoint(last_model_path, model, probe, optimiser, scheduler, scaler, num_gpus)
 
-    # 2. Începem bucla de la start_epoch
     for epoch in range(start_epoch, config['training']['epochs']):
         train_epoch(model, probe, train_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, epoch, augment, config, writer)
         val_f1 = validate_epoch(model, probe, val_loader, f1_metric, epoch, writer)
         
-        # Salvăm starea completă (inclusiv scaler)
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.module.state_dict() if num_gpus > 1 else model.state_dict(),
@@ -315,115 +319,109 @@ def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, si
             print(f"Early stopping triggered after {epoch+1} epochs.")
             break
 
-# def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, augment, config, writer):
-#     checkpoint_dir = config['logging']['checkpoint_dir'].format(experiment_name=config['experiment_name'])
-#     os.makedirs(checkpoint_dir, exist_ok=True)
-#     best_f1 = 0.0
-#     num_gpus = torch.cuda.device_count()
-#     pacience = 50
-#     epochs_no_improve = 0
-
-#     for epoch in range(config['training']['epochs']):
-#         train_epoch(model, probe, train_loader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, epoch, augment, config, writer)
-#         val_f1 = validate_epoch(model, probe, val_loader, f1_metric, epoch, writer)
-        
-#         checkpoint = {
-#             'epoch': epoch,
-#             'model_state_dict': model.module.state_dict() if num_gpus > 1 else model.state_dict(),
-#             'probe_state_dict': probe.module.state_dict() if num_gpus > 1 else probe.state_dict(),
-#             'optimizer_state_dict': optimiser.state_dict(),
-#             'scheduler_state_dict': scheduler.state_dict(),
-#             'best_f1': best_f1,
-#         }
-#         torch.save(checkpoint, os.path.join(checkpoint_dir, "last_model.pth"))
-        
-#         if val_f1 > best_f1:
-#             best_f1 = val_f1
-#             epochs_no_improve = 0
-#             torch.save(checkpoint, os.path.join(checkpoint_dir, "best_model.pth"))
-            
-#             backbone_to_save = model.module.backbone if num_gpus > 1 else model.backbone
-#             torch.save(backbone_to_save.state_dict(), os.path.join(checkpoint_dir, "best_backbone.pth"))
-#             print(f"--- Backbone & Model salvat la epoca {epoch+1} cu F1: {best_f1:.4f} ---")
-#         else:
-#             epochs_no_improve += 1
-#             print(f"No improvement for {epochs_no_improve} epochs.")
-            
-#         if epochs_no_improve >= pacience:
-#             print(f"Early stopping triggered after {epoch+1} epochs.")
-#             break
+    # Marcăm antrenamentul ca fiind complet la ieșirea din buclă
+    with open(done_file_path, "w") as f:
+        f.write("Training completed successfully.")
+    print(f"\n✅ Antrenament complet pentru {config['model']['encoder_name']}! Fișierul DONE a fost creat.")
 
 if __name__ == "__main__":
-    config = {
-        'experiment_name': 'ConvNexTV2_Tiny_lejepa_linear_probe',
-        'logging': {
-            'log_dir': 'runs/{experiment_name}',
-            'checkpoint_dir': 'checkpoints/{experiment_name}'
-        },
-        'training': {
-            'img_size': 256,
-            'batch_size': 10,
-            'epochs': 500,
-            'lr_probe': 1e-4,
-            'lr_model': 1e-5,
-            'weight_decay': 5e-2,
-            'labda': 0.04,
-            'warmup_epochs': 20,
-        },
-        'model': {
-            'encoder_name': 'convnextv2_tiny',
-            'proj_dim': 256
-        }
-    }
-    
-    writer = SummaryWriter(log_dir=config['logging']['log_dir'].format(experiment_name=config['experiment_name']))
-    configCreate(os.path.join(config['logging']['log_dir'].format(experiment_name=config['experiment_name']), 'config.yaml'), config)
-    
-    train_loader = loader(config['training']['img_size'], config['training']['batch_size'], split='train', mode='lejepa')
-    val_loader = loader(config['training']['img_size'], config['training']['batch_size'], split='validation', mode='validation')
-    
-    model = LeJepaModel(encoder_name=config['model']['encoder_name'], proj_dim=config['model']['proj_dim']).cuda()
-    sigreg = SIGReg().cuda()
-    augment = augmentariLeJepa(img_size=config['training']['img_size'], local_size=config['training']['img_size']//2)
-    
-    dummy_input = torch.randn(1, 1, config['training']['img_size'], config['training']['img_size']).cuda()
-    with torch.no_grad():
-        feats, _ = model(dummy_input)
-    encoder_channels = [f.shape[1] for f in feats]
-    
-    probe = MultiScaleLinearProbe(in_channels_list=encoder_channels, probe_dim=256, num_classes=1).cuda()
-    
-    num_gpus = torch.cuda.device_count()
-    if num_gpus > 1:
-        model = nn.DataParallel(model)
-        probe = nn.DataParallel(probe)
+    # Lista cu modelele pe care vrei să le antrenezi succesiv
+    encoders_to_train = ['convnextv2_tiny', 'swinv2_tiny_window8_256', 'resnet50']
 
-    lr1 = {"params": probe.parameters(), "lr": config['training']['lr_probe'], "weight_decay": config['training']['weight_decay']}
-    lr2 = {"params": model.parameters(), "lr": config['training']['lr_model'], "weight_decay": config['training']['weight_decay']}
-    opt = torch.optim.AdamW([lr1, lr2])
-    
-    total_iters_per_epoch = len(train_loader)
-    warmup_iters = config['training']['warmup_epochs'] * total_iters_per_epoch
-    total_iters = config['training']['epochs'] * total_iters_per_epoch
-    
-    scheduler1 = LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=warmup_iters)
-    scheduler2 = CosineAnnealingLR(opt, T_max=total_iters - warmup_iters, eta_min=1e-6)
-    scheduler = SequentialLR(opt, schedulers=[scheduler1, scheduler2], milestones=[warmup_iters])
-    
-    criterion_probe = DiceCELoss(include_background=True, sigmoid=True, lambda_ce=1, lambda_dice=1)
-    f1_metric = BinaryF1Score().cuda()
-    
-    trainScript(
-        model=model,
-        probe=probe,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        optimiser=opt,
-        scheduler=scheduler,
-        sigreg=sigreg,
-        criterion_probe=criterion_probe,
-        f1_metric=f1_metric,
-        augment=augment,
-        config=config,
-        writer=writer
-    )
+    for encoder in encoders_to_train:
+        experiment_name = f"{encoder}_lejepa_strict_probe"
+        checkpoint_dir = f"checkpoints/{experiment_name}"
+        
+        # 1. Verificăm dacă modelul a fost deja antrenat complet
+        if os.path.exists(os.path.join(checkpoint_dir, "DONE")):
+            print(f"\n{'='*60}\n⏭️  Modelul {encoder} a fost deja antrenat (Găsit fișier DONE). Trecem la următorul...\n{'='*60}")
+            continue
+            
+        print(f"\n{'='*60}\n🚀 Începe antrenamentul pentru: {encoder}\n{'='*60}")
+
+        # Configurația dinamică pentru modelul curent
+        config = {
+            'experiment_name': experiment_name,
+            'logging': {
+                'log_dir': f'runs/{experiment_name}',
+                'checkpoint_dir': checkpoint_dir
+            },
+            'training': {
+                'img_size': 256,
+                'batch_size': 20,
+                'epochs': 100,
+                'lr_probe': 1e-5,
+                'lr_model': 1e-4,
+                'weight_decay': 5e-2,
+                'labda': 0.2,
+                'warmup_epochs': 20,
+            },
+            'model': {
+                'encoder_name': encoder,
+                'proj_dim': 64
+            }
+        }
+        
+        # 2. Inițializare Dataloaders și Writer
+        writer = SummaryWriter(log_dir=config['logging']['log_dir'])
+        configCreate(os.path.join(config['logging']['log_dir'], 'config.yaml'), config)
+        
+        train_loader = loader(config['training']['img_size'], config['training']['batch_size'], split='train', mode='lejepa')
+        val_loader = loader(config['training']['img_size'], config['training']['batch_size'], split='validation', mode='validation')
+        
+        # 3. Crearea Modelelor
+        model = LeJepaModel(encoder_name=config['model']['encoder_name'], proj_dim=config['model']['proj_dim']).cuda()
+        sigreg = SIGReg().cuda()
+        augment = augmentariLeJepa(img_size=config['training']['img_size'], local_size=config['training']['img_size']//2)
+        
+        dummy_input = torch.randn(1, 1, config['training']['img_size'], config['training']['img_size']).cuda()
+        with torch.no_grad():
+            feats, _ = model(dummy_input)
+        encoder_channels = [f.shape[1] for f in feats]
+        
+        probe = StrictMultiScaleProbe(in_channels_list=encoder_channels, bottleneck_dim=32, num_classes=1).cuda()
+        
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            model = nn.DataParallel(model)
+            probe = nn.DataParallel(probe)
+
+        # 4. Optimizatori și Schedulere
+        lr1 = {"params": probe.parameters(), "lr": config['training']['lr_probe'], "weight_decay": config['training']['weight_decay']}
+        lr2 = {"params": model.parameters(), "lr": config['training']['lr_model'], "weight_decay": config['training']['weight_decay']}
+        opt = torch.optim.AdamW([lr1, lr2])
+        
+        total_iters_per_epoch = len(train_loader)
+        warmup_iters = config['training']['warmup_epochs'] * total_iters_per_epoch
+        total_iters = config['training']['epochs'] * total_iters_per_epoch
+        
+        scheduler1 = LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=warmup_iters)
+        scheduler2 = CosineAnnealingLR(opt, T_max=total_iters - warmup_iters, eta_min=1e-6)
+        scheduler = SequentialLR(opt, schedulers=[scheduler1, scheduler2], milestones=[warmup_iters])
+        
+        criterion_probe = DiceCELoss(include_background=True, sigmoid=True, lambda_ce=1, lambda_dice=1)
+        f1_metric = BinaryF1Score().cuda()
+        
+        # 5. Pornire Script
+        trainScript(
+            model=model,
+            probe=probe,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            optimiser=opt,
+            scheduler=scheduler,
+            sigreg=sigreg,
+            criterion_probe=criterion_probe,
+            f1_metric=f1_metric,
+            augment=augment,
+            config=config,
+            writer=writer
+        )
+        
+        # 6. Clean-up după fiecare model pentru a elibera memoria GPU pentru următorul
+        writer.close()
+        del model, probe, opt, scheduler, train_loader, val_loader
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    print("\n🎉 Toate modelele din listă au fost procesate!")

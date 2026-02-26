@@ -292,7 +292,7 @@ def trainScript(model,
 if __name__ == "__main__":
     
     config = {
-    'experiment_name': 'resnet50_no_pretrain_unet',
+    'experiment_name': 'convnextv2_tiny_imagenet_no_pretrain_unet',
     'logging': {
         'log_dir': 'runs/{experiment_name}',
         'checkpoint_dir': 'checkpoints/{experiment_name}'
@@ -331,15 +331,17 @@ if __name__ == "__main__":
     
     
     model = smp.Unet(
-    encoder_name="resnet50",
-    encoder_weights=None,   
+    encoder_name="tu-convnextv2_tiny",
+    encoder_weights="imagenet",  # Folosim greutățile pre-antrenate pe ImageNet
     in_channels=1,
     classes=1,
-    encoder_depth=4,            # Adâncimea standard
-    decoder_channels=(384, 192, 96, 32),
+    encoder_depth=5,            # Adâncimea standard
+    decoder_channels=(384, 192, 96, 32,16),
     decoder_use_batchnorm=True,   # Normalizare standard pe decoder
     decoder_attention_type='scse' # Atenția spațială și pe canale
 ).cuda()
+    
+    
     
     
     
