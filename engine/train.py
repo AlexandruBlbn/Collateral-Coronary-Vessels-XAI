@@ -332,13 +332,13 @@ if __name__ == "__main__":
     
     model = smp.Unet(
     encoder_name="tu-convnextv2_tiny",
-    encoder_weights="imagenet",  # Folosim greutățile pre-antrenate pe ImageNet
+    encoder_weights="imagenet", 
     in_channels=1,
     classes=1,
     encoder_depth=5,            # Adâncimea standard
     decoder_channels=(384, 192, 96, 32,16),
-    decoder_use_batchnorm=True,   # Normalizare standard pe decoder
-    decoder_attention_type='scse' # Atenția spațială și pe canale
+    decoder_use_batchnorm=True,   
+    decoder_attention_type='scse'
 ).cuda()
     
     

@@ -74,17 +74,33 @@ class ArcadeDataset(Dataset):
     def __getitem__(self, idx):
         item = self.samples[idx]
         img_path = item['image_path']
-        label_path = item['label']
+        label_path = item.get('label', None)  # Previne KeyError și setează None dacă lipsește
+        
+        # Extragem informația, dar o returnăm doar dacă e nevoie
+        is_syntax = (item.get('source', '') == 'syntax')
 
         if self.root_dir:
             img_path = os.path.join(self.root_dir, img_path)
-            label_path = os.path.join(self.root_dir, label_path)
+            
         image = Image.open(img_path).convert('L')
-        label = Image.open(label_path).convert('L')
+        
+        # --- VERIFICARE ȘI TRATARE LABEL_PATH ---
+        # Dacă label_path este valid (string), îl combinăm și încărcăm
+        if isinstance(label_path, str) and label_path != "":
+            if self.root_dir:
+                label_path = os.path.join(self.root_dir, label_path)
+            label = Image.open(label_path).convert('L')
+        else:
+            # Dacă nu are label (ex: date extra), creăm o mască neagră falsă 
+            # de aceeași dimensiune cu imaginea
+            label = Image.new('L', image.size, 0)
 
         if self.transform:
             image = self.transform(image)
             label = self.transform(label)
 
-        # All modes return (image, label)
+        # ---> VERIFICAREA AICI <---
+        if self.mode == 'pretrain':
+            return image, label, is_syntax
+        
         return image, label
