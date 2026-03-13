@@ -67,6 +67,20 @@ def load_pretrained_backbone(smp_model, backbone_path):
 
     print(f"🔄 Se încarcă backbone-ul de la: {backbone_path}")
     state_dict = torch.load(backbone_path, map_location='cuda')
+
+    # Accept either a bare backbone state_dict (best_backbone.pth) or a full
+    # training checkpoint containing model_state_dict.
+    if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+        full_state = state_dict['model_state_dict']
+        # Keep only backbone weights if this is a full SparK checkpoint.
+        if any(k.startswith('backbone.') for k in full_state.keys()):
+            state_dict = {
+                k.replace('backbone.', '', 1): v
+                for k, v in full_state.items()
+                if k.startswith('backbone.')
+            }
+        else:
+            state_dict = full_state
     
     # SMP stochează modelul timm original în `smp_model.encoder.model` pentru encoderele 'tu-*'
     try:
@@ -80,6 +94,76 @@ def load_pretrained_backbone(smp_model, backbone_path):
         print("✅ Fallback aplicat cu succes.")
         
     return smp_model
+
+
+def get_decoder_config(base_encoder):
+    if base_encoder == 'resnet50':
+        return 5, (512, 256, 128, 64, 32)
+    if base_encoder == 'convnextv2_tiny':
+        # For SMP Unet++ with timm universal encoders, using depth=5 avoids
+        # zero-channel nested decoder blocks seen with depth=4 on ConvNeXtV2.
+        return 5, (256, 128, 64, 32, 16)
+    raise ValueError(f"Encoder nesuportat pentru fine-tuning SparK: {base_encoder}")
+
+
+def build_segmentation_model(base_encoder):
+    smp_encoder_name = f"tu-{base_encoder}"
+    enc_depth, dec_channels = get_decoder_config(base_encoder)
+    model = smp.UnetPlusPlus(
+        encoder_name=smp_encoder_name,
+        encoder_weights=None,
+        in_channels=1,
+        classes=1,
+        encoder_depth=enc_depth,
+        decoder_channels=dec_channels,
+        decoder_use_batchnorm=True,
+        decoder_attention_type='scse'
+    )
+
+    # SMP + tu-convnextv2_tiny currently exposes an intermediate skip with
+    # 0 channels (encoder.out_channels contains [..., 0, ...]), which makes
+    # Unet++ instantiate invalid conv layers (out_channels=0). If detected,
+    # fall back to Unet so the experiment suite can run end-to-end.
+    bad_skip = any(ch == 0 for ch in getattr(model.encoder, 'out_channels', []))
+    if bad_skip:
+        print(f"⚠️  Unet++ incompatibil cu {smp_encoder_name} (skip cu 0 canale). "
+              "Fallback la Unet pentru acest encoder.")
+        model = smp.Unet(
+            encoder_name=smp_encoder_name,
+            encoder_weights=None,
+            in_channels=1,
+            classes=1,
+            encoder_depth=enc_depth,
+            decoder_channels=dec_channels,
+            decoder_use_batchnorm=True,
+            decoder_attention_type='scse'
+        )
+
+    return model.cuda()
+
+
+def build_optimiser(model, config):
+    mode = config['training']['mode']
+    if mode == 'frozen':
+        print("❄️  Mod FROZEN: Backbone-ul este înghețat, se antrenează doar decoder-ul.")
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+
+        return optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=config['training']['learning_rate_decoder'],
+            weight_decay=1e-4
+        )
+
+    print("🔥 Mod UNFROZEN: Fine-tuning complet (Backbone LR mai mic, Decoder LR mai mare).")
+    for param in model.encoder.parameters():
+        param.requires_grad = True
+
+    return optim.AdamW([
+        {'params': model.encoder.parameters(), 'lr': config['training']['learning_rate_encoder']},
+        {'params': model.decoder.parameters(), 'lr': config['training']['learning_rate_decoder']},
+        {'params': model.segmentation_head.parameters(), 'lr': config['training']['learning_rate_decoder']}
+    ], weight_decay=1e-4)
 
 # Funcțiile de validare, testare și evaluare praguri rămân la fel ca în scriptul tău original
 def train_epoch(model, dataloader, criterion, optimiser, f1_metric, epoch, writer, current_step):
@@ -278,8 +362,8 @@ def trainScript(model, train_loader, val_loader, test_loader, criterion, optimis
 
 
 if __name__ == "__main__":
-    
-    encoders = ['convnextv2_tiny', 'swinv2_tiny_window8_256', 'resnet50']
+
+    encoders = ['convnextv2_tiny']
     modes = ['frozen', 'unfrozen']
     
     # Detalii generale training
@@ -317,57 +401,13 @@ if __name__ == "__main__":
             writer = SummaryWriter(log_dir=config['logging']['log_dir'])
             configCreate(os.path.join(config['logging']['log_dir'], 'config.yaml'), config)
             
-            # Mapare nume encoder pentru librăria SMP (adaugă prefix tu-)
-            smp_encoder_name = f"tu-{base_encoder}"
-            
-            
-            # Ajustăm dinamic adâncimea și canalele decoderului
-            if base_encoder == 'resnet50':
-                enc_depth = 5
-                dec_channels = (512, 256, 128, 64, 32) # 5 valori pentru depth=5
-            else:
-                enc_depth = 4
-                dec_channels = (384, 192, 96, 32)      # 4 valori pentru depth=4
-            
-            # Instanțierea modelului
-            model = smp.Unet(
-                encoder_name=smp_encoder_name,
-                encoder_weights=None,   
-                in_channels=1,
-                classes=1,
-                encoder_depth=enc_depth,            
-                decoder_channels=dec_channels,
-                decoder_use_batchnorm=True,   
-                decoder_attention_type='scse' 
-            ).cuda()
-            
-            # Calea de unde luăm backbone-ul antrenat de tine cu LeJEPA
-            pretrained_backbone_path = f"checkpoints/{base_encoder}_lejepa_strict_probe/best_backbone.pth"
+            model = build_segmentation_model(base_encoder)
+
+            # Calea către backbone-ul preantrenat cu SparK
+            pretrained_backbone_path = f"checkpoints/{base_encoder}_spark/best_backbone.pth"
             model = load_pretrained_backbone(model, pretrained_backbone_path)
-            
-            # Configurare parametri optimizator în funcție de Frozen vs Unfrozen
-            if mode == 'frozen':
-                print("❄️  Mod FROZEN: Backbone-ul este înghețat, se antrenează doar decoder-ul.")
-                for param in model.encoder.parameters():
-                    param.requires_grad = False
-                    
-                # Optimizatorul vede doar parametrii care au requires_grad=True (decoder + cap segmentare)
-                optimiser = optim.AdamW(
-                    filter(lambda p: p.requires_grad, model.parameters()), 
-                    lr=config['training']['learning_rate_decoder'], 
-                    weight_decay=1e-4
-                )
-            else: # unfrozen
-                print("🔥 Mod UNFROZEN: Fine-tuning complet (Backbone LR mai mic, Decoder LR mai mare).")
-                for param in model.encoder.parameters():
-                    param.requires_grad = True
-                    
-                # Setăm grupuri de parametri cu Learning Rate-uri diferite
-                optimiser = optim.AdamW([
-                    {'params': model.encoder.parameters(), 'lr': config['training']['learning_rate_encoder']},
-                    {'params': model.decoder.parameters(), 'lr': config['training']['learning_rate_decoder']},
-                    {'params': model.segmentation_head.parameters(), 'lr': config['training']['learning_rate_decoder']}
-                ], weight_decay=1e-4)
+
+            optimiser = build_optimiser(model, config)
 
             criterion = DiceCELoss(include_background=True, sigmoid=True, lambda_ce=1, lambda_dice=1)
             scheduler = CosineAnnealingLR(optimiser, T_max=config['training']['epochs'])

@@ -47,7 +47,14 @@ class TransformsWrapper(Dataset):
             angle = torch.randint(-15, 15, (1,)).item()
             img = tf.rotate(img, angle)
             mask = tf.rotate(mask, angle)
-            
+
+            if torch.rand(1).item() > 0.7:
+                sigma = torch.empty(1).uniform_(0.5, 1.5).item()
+                img = tf.gaussian_blur(img, kernel_size=[5, 5], sigma=[sigma, sigma])
+    
+            if torch.rand(1).item() > 0.5:
+                img = tf.adjust_brightness(img, brightness_factor=torch.empty(1).uniform_(0.8, 1.2).item())
+
         if self.mode == "lejepa":
             if torch.rand(1).item() > 0.5:
                 img = tf.hflip(img)
@@ -59,13 +66,17 @@ class TransformsWrapper(Dataset):
             if torch.rand(1).item() > 0.8:
                 sigma = torch.empty(1).uniform_(0.1, 2.0).item()
                 img = tf.gaussian_blur(img, kernel_size=[7, 7], sigma=[sigma, sigma])
-            if torch.rand(1).item() > 0.8:
-                img = tf.solarize(img, threshold=128) 
                 
         img_np = np.array(img)
         if len(img_np.shape) == 3:
             img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-            
+
+        # CLAHE: enhance local vessel contrast before normalisation.
+        # clipLimit=2.0 prevents over-amplifying noise in flat background regions.
+        # tileGridSize=(8,8) matches the tile size used in frangiPreproces.py.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img_np = clahe.apply(img_np)
+
         img_tensor = tf.to_tensor(img_np)
         img_tensor = tf.normalize(img_tensor, [0.5], [0.5])
         

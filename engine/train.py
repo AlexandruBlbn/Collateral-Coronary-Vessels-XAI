@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
 from tqdm import tqdm
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as tf
@@ -33,8 +33,8 @@ from utils.helpers import set_seed
 import numpy as np
 import random
 
-scaler = torch.amp.GradScaler()
 from segmentation_models_pytorch.metrics import sensitivity, specificity, iou_score
+from segmentation_models_pytorch.losses import TverskyLoss, SoftBCEWithLogitsLoss
 from monai.networks.nets.unet import UNet
 from monai.networks.nets.swin_unetr import SwinUNETR
 from monai.losses import DiceCELoss
@@ -76,19 +76,40 @@ def modelChange(model, old_layer, new_layer):
             setattr(model, k, new_layer)
     return model.cuda()
 
+def load_pretrained_backbone(model, backbone_path):
+    """Load LeJEPA best_backbone.pth into the SMP model encoder.
+    Handles both tu- encoders (timm keys need 'model.' prefix) and
+    standard SMP encoders (direct key match for layer1-layer4).
+    """
+    if backbone_path is None or not os.path.isfile(backbone_path):
+        print(f"[Backbone] No pretrained weights loaded (path: {backbone_path})")
+        return model
+    lejepa_sd = torch.load(backbone_path, map_location='cpu')
+    encoder_sd = model.encoder.state_dict()
+    compatible = {}
+    for k, v in lejepa_sd.items():
+        if k in encoder_sd and encoder_sd[k].shape == v.shape:
+            compatible[k] = v
+        elif f'model.{k}' in encoder_sd and encoder_sd[f'model.{k}'].shape == v.shape:
+            compatible[f'model.{k}'] = v
+    encoder_sd.update(compatible)
+    model.encoder.load_state_dict(encoder_sd)
+    print(f"[Backbone] Loaded {len(compatible)}/{len(encoder_sd)} layers from {backbone_path}")
+    return model
+
 def train_epoch(model, dataloader, criterion, optimiser, f1_metric, epoch):
     model.train()
     running_loss = 0
     pbar = tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch+1}")
     for batch_idx, (images, masks) in pbar:
         images, masks = images.cuda(), masks.cuda()
+        optimiser.zero_grad(set_to_none=True)
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             output = model(images)
             loss = criterion(output, masks)
-        optimiser.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimiser)
-        scaler.update()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimiser.step()
         running_loss += loss.item()
         pbar.set_postfix({'Loss': running_loss / (batch_idx + 1)})
     writer.add_scalar('Loss/train', running_loss / len(dataloader), epoch)
@@ -292,7 +313,7 @@ def trainScript(model,
 if __name__ == "__main__":
     
     config = {
-    'experiment_name': 'convnextv2_tiny_imagenet_no_pretrain_unet',
+    'experiment_name': 'resnet50_unetplusplus',
     'logging': {
         'log_dir': 'runs/{experiment_name}',
         'checkpoint_dir': 'checkpoints/{experiment_name}'
@@ -301,13 +322,16 @@ if __name__ == "__main__":
         'img_size': 256,
         'batch_size': 16,
         'epochs': 100,
-        'learning_rate': 5e-4,
-        'loss_function': "BCE + dICE",
+        'learning_rate': 2e-4,
+        'loss_function': "twersky + BCE",
         'scheduler': 'CosineAnnealingLR',
         'precision': 'bfloat16',
     },
     'model': {
         'model': 'summary',
+        # Set to LeJEPA checkpoint path to load pretrained backbone, e.g.:
+        # 'checkpoints/resnet50_lejepa_strict_probe_v2/best_backbone.pth'
+        'pretrained_backbone': None,
     }
     }
     writer = SummaryWriter(
@@ -330,31 +354,36 @@ if __name__ == "__main__":
     # ).cuda()
     
     
-    model = smp.Unet(
-    encoder_name="tu-convnextv2_tiny",
-    encoder_weights="imagenet", 
+    model = smp.UnetPlusPlus(
+    encoder_name="resnet50",
+    encoder_weights=None,
     in_channels=1,
     classes=1,
-    encoder_depth=5,            # Adâncimea standard
-    decoder_channels=(384, 192, 96, 32,16),
-    decoder_use_batchnorm=True,   
+    encoder_depth=5,
+    decoder_channels=(512, 256, 128, 64,32),
+    decoder_use_batchnorm=True,
     decoder_attention_type='scse'
 ).cuda()
-    
-    
-    
-    
-    
-    
+
+    if config['model'].get('pretrained_backbone'):
+        model = load_pretrained_backbone(model, config['model']['pretrained_backbone'])
 
     optimiser = optim.AdamW(model.parameters(), lr=config['training']['learning_rate'], weight_decay=1e-4)
-    criterion = DiceCELoss(
-        include_background=True,
-        sigmoid=True,
-        lambda_ce=1,
-        lambda_dice=1
+
+    tversky_loss_fn = TverskyLoss(
+        mode='binary',
+        beta=0.7,
+        gamma=0.75,
+        log_loss=False,
     )
-    scheduler = CosineAnnealingLR(optimiser, T_max=config['training']['epochs'])
+    bce_loss_fn = SoftBCEWithLogitsLoss()
+
+    def criterion(pred, target):
+        return tversky_loss_fn(pred, target) + bce_loss_fn(pred, target)
+
+    warmup = LinearLR(optimiser, start_factor=0.1, end_factor=1.0, total_iters=5)
+    cosine = CosineAnnealingLR(optimiser, T_max=config['training']['epochs'] - 5)
+    scheduler = SequentialLR(optimiser, schedulers=[warmup, cosine], milestones=[5])
     f1_metric = BinaryF1Score().cuda()
     iou_metric = BinaryJaccardIndex().cuda()
     configCreate(os.path.join(config['logging']['log_dir'].format(experiment_name=config['experiment_name']), 'config.yaml'), config)
