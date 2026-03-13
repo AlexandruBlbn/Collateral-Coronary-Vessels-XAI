@@ -1,412 +1,638 @@
-"""
-Visualise what the model receives during LeJEPA pretraining.
-
-Layout
-------
-For each image in the batch (rows) the figure shows:
-
-  Col 0    : RAW input  (straight from the dataloader, before any augmentation)
-  Col 1-2  : Global crop 1 & 2  (70-100 % scale, after BorderJitter + stochastic aug)
-  Col 3-5  : Local  crop 1-3   (40-80 % scale, after BorderJitter + stochastic aug)
-
-All images are displayed in their normalised [-1, 1] range remapped to [0, 1] for
-display so you can directly see what the backbone receives (not a pretty de-normalised
-version — the actual tensor values).
-
-Run: python main.py
-"""
-
-import os
-import sys
+import argparse
+import json
 import random
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import timm
-import segmentation_models_pytorch as smp
-import matplotlib
-matplotlib.use('Agg')          # no display needed — saves to file
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import matplotlib.cm as cm
-
-# ── make project imports available ──────────────────────────────────────────
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
-
-from engine.LeJepa_Train import loader as lejepa_loader, augmentariLeJepa
-from engine.SparK_Train import SparKModel
-from utils.helpers import set_seed
-
-# ── config ──────────────────────────────────────────────────────────────────
-IMG_SIZE   = 256
-BATCH_SIZE = 8          # how many images to show (one row each)
-SEED       = 42
-
-set_seed(SEED)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GradCAM comparison: UNetPlusPlus encoder  vs  SparK backbone
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_smp_encoder(ckpt_path: str) -> nn.Module:
-    """
-    Reconstruct the SMP UnetPlusPlus used in train.py, load the full checkpoint,
-    then return the SMP encoder submodule.
-
-    smp_model.encoder(x) returns a list of multi-scale feature maps (EncoderMixin),
-    identical interface to a timm features_only backbone.
-    """
-    model = smp.UnetPlusPlus(
-        encoder_name="resnet50",
-        encoder_weights=None,
-        in_channels=1,
-        classes=1,
-        encoder_depth=5,
-        decoder_channels=(512, 256, 128, 64, 32),
-        decoder_use_batchnorm=True,
-        decoder_attention_type='scse',
-    )
-    ckpt = torch.load(ckpt_path, map_location='cpu')
-    state = ckpt.get('model_state_dict', ckpt)
-    model.load_state_dict(state, strict=True)
-    encoder = model.encoder
-    encoder.eval()
-    return encoder
-
-
-def _build_spark_backbone(ckpt_path: str) -> nn.Module:
-    """
-    Build a bare timm resnet50 (features_only=True, in_chans=1) and load the
-    SparK best_backbone.pth weights saved by SparK_Train.py.
-    """
-    backbone = timm.create_model(
-        'resnet50',
-        pretrained=False,
-        in_chans=1,
-        features_only=True,
-    )
-    state = torch.load(ckpt_path, map_location='cpu')
-    backbone.load_state_dict(state, strict=True)
-    backbone.eval()
-    return backbone
-
-
-def _build_convnext_spark_backbone(ckpt_path: str) -> nn.Module:
-    """
-    Build a bare timm convnextv2_tiny (features_only=True, in_chans=1) and load
-    the SparK best_backbone.pth weights saved by SparK_Train.py.
-    ConvNeXtV2-tiny strides: [4, 8, 16, 32] → stride-8 feature is index 1.
-    """
-    backbone = timm.create_model(
-        'convnextv2_tiny',
-        pretrained=False,
-        in_chans=1,
-        features_only=True,
-    )
-    state = torch.load(ckpt_path, map_location='cpu')
-    backbone.load_state_dict(state, strict=True)
-    backbone.eval()
-    return backbone
-
-
-def _build_spark_model(encoder_name: str, ckpt_path: str) -> SparKModel:
-    """
-    Rebuild the full SparK model so the trained FrangiHead can drive the CAM.
-    """
-    model = SparKModel(
-        encoder_name=encoder_name,
-        img_size=IMG_SIZE,
-        patch_size=16,
-        mask_ratio=0.65,
-        vessel_bias=3.0,
-        frangi_weight=1.0,
-    )
-    ckpt = torch.load(ckpt_path, map_location='cpu')
-    state = ckpt.get('model_state_dict', ckpt)
-    model.load_state_dict(state, strict=False)
-    model.eval()
-    return model
-
-
-def _gradcam(backbone: nn.Module, imgs: torch.Tensor,
-             feat_idx: int | None = None) -> np.ndarray:
-    """
-    Compute GradCAM for a batch.
-
-    feat_idx : which feature level to use (None = last/coarsest). Use stride-8
-               for SparK backbones (ResNet50: idx 2; ConvNeXtV2-tiny: idx 1).
-
-    Works for any backbone whose forward() returns List[Tensor] (both the SMP
-    encoder and a timm features_only backbone satisfy this contract).
-
-    Returns (B, H, W) float32 numpy array in [0, 1].
-    """
-    with torch.enable_grad():
-        feats = backbone(imgs.detach().float())
-        idx   = feat_idx if feat_idx is not None else -1
-        last  = feats[idx].float()         # (B, C, h, w)
-        last.retain_grad()
-        last.mean().backward()
-
-    with torch.no_grad():
-        grad  = last.grad                                              # (B, C, h, w)
-        alpha = grad.mean(dim=(2, 3), keepdim=True)                    # (B, C, 1, 1)
-        cam   = F.relu((alpha * last).sum(dim=1, keepdim=True))        # (B, 1, h, w)
-        cam   = F.interpolate(cam, size=imgs.shape[2:],
-                              mode='bilinear', align_corners=False)    # (B, 1, H, W)
-        cam   = cam / (cam.amax(dim=(1, 2, 3), keepdim=True) + 1e-8)
-        cam_np = cam.squeeze(1).cpu().numpy()                          # (B, H, W)
-
-    return cam_np
-
-
-def _spark_vessel_cam(model: SparKModel, imgs: torch.Tensor) -> np.ndarray:
-    """
-    Compute a CAM by backpropagating the trained FrangiHead's mean vesselness
-    score to the stride-4 backbone feature it actually supervises.
-
-    Returns (B, H, W) float32 numpy array in [0, 1].
-    """
-    with torch.enable_grad():
-        model.zero_grad(set_to_none=True)
-        feats = model.backbone(imgs.detach().float())
-        target_feat = feats[model.frangi_feat_idx].float()
-        target_feat.retain_grad()
-        vessel_pred = model.frangi_head(target_feat)
-        vessel_pred.mean().backward()
-
-    with torch.no_grad():
-        grad = target_feat.grad
-        alpha = grad.mean(dim=(2, 3), keepdim=True)
-        cam = F.relu((alpha * target_feat).sum(dim=1, keepdim=True))
-        cam = F.interpolate(cam, size=imgs.shape[2:], mode='bilinear', align_corners=False)
-        cam = cam / (cam.amax(dim=(1, 2, 3), keepdim=True) + 1e-8)
-    return cam.squeeze(1).cpu().numpy()
-
-
-def _jet_blend(img_np: np.ndarray, cam_np: np.ndarray,
-               alpha: float = 0.45) -> np.ndarray:
-    """Blend a jet-coloured CAM over a greyscale image. Returns (H, W, 3) uint8."""
-    rgb  = np.stack([img_np] * 3, axis=-1)                # (H, W, 3)
-    jet  = cm.jet(cam_np)[:, :, :3]                        # (H, W, 3)
-    out  = (1 - alpha) * rgb + alpha * jet
-    return np.clip(out, 0, 1)
-
-
-def run_gradcam_comparison():
-    """
-    Load one validation batch, run GradCAM through both the UnetPlusPlus-trained
-    resnet50 encoder and the SparK-pretrained resnet50, and save a side-by-side
-    figure.
-
-    Columns per image row:
-        [original | UNet++ GradCAM | SparK GradCAM | GT mask]
-    """
-    UNET_CKPT  = 'checkpoints/resnet50_unetplusplus/best_model.pth'
-    SPARK_CKPT = 'checkpoints/resnet50_spark/best_model.pth'
-    OUT_PATH   = 'gradcam_comparison.png'
-    N_VIS      = 8
-
-    print("Loading UNet++ encoder …")
-    bb_unet  = _build_smp_encoder(UNET_CKPT)
-
-    print("Loading SparK model …")
-    spark_model = _build_spark_model('resnet50', SPARK_CKPT)
-
-    # Validation loader — returns (img, mask) in the 'syntax' split
-    val_loader = lejepa_loader(IMG_SIZE, N_VIS, split='validation', mode='validation')
-    batch      = next(iter(val_loader))
-    imgs       = batch[0]          # (B, 1, H, W) in [-1, 1]
-    gt_masks   = batch[1]          # (B, 1, H, W)
-    B          = imgs.size(0)
-
-    print(f"Running GradCAM on {B} images …")
-    # ResNet50: strides [2,4,8,16,32] → stride-8 is index 2
-    cam_unet  = _gradcam(bb_unet,  imgs)
-    cam_spark = _spark_vessel_cam(spark_model, imgs)
-
-    # ── Plot ────────────────────────────────────────────────────────────────
-    n_cols = 4   # original | unet++ cam | spark cam | GT mask
-    fig, axes = plt.subplots(B, n_cols, figsize=(3.5 * n_cols, 3.2 * B),
-                              squeeze=False)
-    fig.suptitle(
-        "GradCAM comparison — same validation batch\n"
-        "Col: Original  |  UNet++ encoder  |  SparK vessel CAM  |  GT mask",
-        fontsize=11, y=1.005
-    )
-
-    col_titles  = ["Original", "UNet++ GradCAM", "SparK VesselCAM", "GT Mask"]
-    col_borders = ["#555555", "#1f77b4", "#d62728", "#555555"]
-
-    for row in range(B):
-        img_np  = (imgs[row, 0].numpy() * 0.5 + 0.5).clip(0, 1)   # (H, W) in [0,1]
-        mask_np = gt_masks[row, 0].numpy().clip(0, 1)
-
-        panels = [
-            img_np,
-            _jet_blend(img_np, cam_unet[row]),
-            _jet_blend(img_np, cam_spark[row]),
-            mask_np,
-        ]
-        cmaps  = ['gray', None, None, 'gray']
-
-        for col, (panel, cmap, title, border) in enumerate(
-                zip(panels, cmaps, col_titles, col_borders)):
-            ax = axes[row, col]
-            ax.imshow(panel, cmap=cmap, vmin=0, vmax=1, interpolation='bilinear')
-            ax.set_xticks([])
-            ax.set_yticks([])
-            for spine in ax.spines.values():
-                spine.set_edgecolor(border)
-                spine.set_linewidth(2.5)
-            if row == 0:
-                ax.set_title(title, fontsize=9, pad=3, color=border)
-        axes[row, 0].set_ylabel(f"img {row}", fontsize=8, rotation=0,
-                                labelpad=30, va='center')
-
-    plt.tight_layout()
-    plt.savefig(OUT_PATH, dpi=130, bbox_inches='tight')
-    print(f"Saved → {OUT_PATH}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LeJEPA augmentation visualisation (original main)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def tensor_to_display(t: torch.Tensor) -> np.ndarray:
-    arr = t.squeeze(0).float().cpu().numpy()
-    arr = (arr * 0.5 + 0.5).clip(0.0, 1.0)
-    return arr
-
-
-def run_lejepa_vis():
-    OUT_PATH = "pretrain_batch_vis.png"
-    print(f"Loading one pretrain batch  (batch_size={BATCH_SIZE}, img_size={IMG_SIZE}) …")
-    train_loader = lejepa_loader(IMG_SIZE, BATCH_SIZE, split='train', mode='lejepa')
-
-    raw_imgs, _, _ = next(iter(train_loader))
-    augment = augmentariLeJepa(img_size=IMG_SIZE)
-
-    with torch.no_grad():
-        crops = augment(raw_imgs)
-
-    crop_labels = ["Global 1", "Global 2", "Local 1", "Local 2", "Local 3"]
-    B      = raw_imgs.size(0)
-    n_cols = 1 + len(crops)
-    col_labels = ["RAW"] + crop_labels
-
-    fig = plt.figure(figsize=(3.2 * n_cols, 3.0 * B))
-    fig.suptitle(
-        "LeJEPA pretrain — what the backbone receives\n"
-        "Rows = images in batch   |   Cols = RAW · Global×2 · Local×3",
-        fontsize=12, y=1.01
-    )
-    gs = gridspec.GridSpec(B, n_cols, figure=fig, hspace=0.05, wspace=0.05)
-
-    for row in range(B):
-        for col in range(n_cols):
-            ax = fig.add_subplot(gs[row, col])
-            if col == 0:
-                img_np = tensor_to_display(raw_imgs[row])
-                border_color = "#444444"
-            else:
-                img_np = tensor_to_display(crops[col - 1][row])
-                border_color = "#2ca02c" if col <= 2 else "#ff7f0e"
-
-            ax.imshow(img_np, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
-            ax.set_xticks([])
-            ax.set_yticks([])
-            for spine in ax.spines.values():
-                spine.set_edgecolor(border_color)
-                spine.set_linewidth(2.5)
-            if row == 0:
-                ax.set_title(col_labels[col], fontsize=9, pad=3,
-                             color=border_color if col > 0 else "black")
-            if col == 0:
-                ax.set_ylabel(f"img {row}", fontsize=8, rotation=0,
-                              labelpad=28, va='center')
-
-    plt.savefig(OUT_PATH, dpi=120, bbox_inches='tight')
-    print(f"Saved → {OUT_PATH}")
-
-
-def run_convnext_gradcam():
-    """
-    Load ConvNeXtV2-tiny SparK backbone and ResNet50 SparK backbone, run
-    GradCAM on a validation batch, and save a side-by-side figure.
-
-    Columns per image row:
-        [Original | ResNet50 SparK | ConvNeXtV2-tiny SparK | GT mask]
-    """
-    RESNET_CKPT  = 'checkpoints/resnet50_spark/best_model.pth'
-    CONVNEXT_CKPT = 'checkpoints/convnextv2_tiny_spark/best_model.pth'
-    OUT_PATH     = 'gradcam_convnext_vs_resnet.png'
-    N_VIS        = 8
-
-    print("Loading ResNet50 SparK model …")
-    spark_resnet = _build_spark_model('resnet50', RESNET_CKPT)
-
-    print("Loading ConvNeXtV2-tiny SparK model …")
-    spark_convnext = _build_spark_model('convnextv2_tiny', CONVNEXT_CKPT)
-
-    val_loader = lejepa_loader(IMG_SIZE, N_VIS, split='validation', mode='validation')
-    batch      = next(iter(val_loader))
-    imgs       = batch[0]          # (B, 1, H, W) in [-1, 1]
-    gt_masks   = batch[1]          # (B, 1, H, W)
-    B          = imgs.size(0)
-
-    print(f"Running vessel-aware CAM on {B} images …")
-    cam_resnet   = _spark_vessel_cam(spark_resnet, imgs)
-    cam_convnext = _spark_vessel_cam(spark_convnext, imgs)
-
-    n_cols = 4
-    fig, axes = plt.subplots(B, n_cols, figsize=(3.5 * n_cols, 3.2 * B),
-                              squeeze=False)
-    fig.suptitle(
-        "Vessel CAM comparison — SparK pretrained backbones\n"
-        "Col: Original  |  ResNet50 SparK  |  ConvNeXtV2-tiny SparK  |  GT mask",
-        fontsize=11, y=1.005
-    )
-
-    col_titles  = ["Original", "ResNet50 VesselCAM", "ConvNeXtV2 VesselCAM", "GT Mask"]
-    col_borders = ["#555555", "#d62728", "#2ca02c", "#555555"]
-
-    for row in range(B):
-        img_np  = (imgs[row, 0].numpy() * 0.5 + 0.5).clip(0, 1)
-        mask_np = gt_masks[row, 0].numpy().clip(0, 1)
-
-        panels = [
-            img_np,
-            _jet_blend(img_np, cam_resnet[row]),
-            _jet_blend(img_np, cam_convnext[row]),
-            mask_np,
-        ]
-        cmaps  = ['gray', None, None, 'gray']
-
-        for col, (panel, cmap, title, border) in enumerate(
-                zip(panels, cmaps, col_titles, col_borders)):
-            ax = axes[row, col]
-            ax.imshow(panel, cmap=cmap, vmin=0, vmax=1, interpolation='bilinear')
-            ax.set_xticks([])
-            ax.set_yticks([])
-            for spine in ax.spines.values():
-                spine.set_edgecolor(border)
-                spine.set_linewidth(2.5)
-            if row == 0:
-                ax.set_title(title, fontsize=9, pad=3, color=border)
-        axes[row, 0].set_ylabel(f"img {row}", fontsize=8, rotation=0,
-                                labelpad=30, va='center')
-
-    plt.tight_layout()
-    plt.savefig(OUT_PATH, dpi=130, bbox_inches='tight')
-    print(f"Saved → {OUT_PATH}")
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
+import cv2
+from PIL import Image
+from skimage.filters import frangi
+
+
+class LeJepaCropper:
+	"""LeJepa-style multi-crop logic used for visualization."""
+
+	def __init__(
+		self,
+		img_size: int = 256,
+		num_global_crops: int = 2,
+		num_local_crops: int = 4,
+		local_threshold: float = 0.02,
+		background_threshold: float = 0.01,
+		global_vessel_threshold: float = 0.015,
+		max_global_retries: int = 12,
+		max_local_retries: int = 20,
+	):
+		self.img_size = img_size
+		self.border_jitter_size = int(img_size * 0.88)
+		self.global_scale = (0.8, 1.0)
+		self.local_scale = (0.10, 0.35)
+		self.crop_ratio = (3.0 / 4.0, 4.0 / 3.0)
+		self.num_global_crops = num_global_crops
+		self.num_local_crops = num_local_crops
+		self.local_vessel_fraction = 0.75
+		self.global_vessel_threshold = global_vessel_threshold
+		self.max_global_retries = max_global_retries
+		self.local_threshold = local_threshold
+		self.background_threshold = background_threshold
+		self.max_local_retries = max_local_retries
+
+	@staticmethod
+	def _fill_fov_border(img: torch.Tensor) -> torch.Tensor:
+		img = img.clone()
+		fill_val = img.mean()
+
+		border_mask = img < -0.85
+		if border_mask.float().mean() >= 0.01:
+			img[border_mask] = fill_val
+
+		h = img.shape[-2]
+		fringe = max(1, int(h * 0.08))
+		top_band = img[..., :fringe, :]
+		bottom_band = img[..., -fringe:, :]
+		if (top_band > 0.7).float().mean() > 0.35:
+			img[..., :fringe, :] = fill_val
+		if (bottom_band > 0.7).float().mean() > 0.35:
+			img[..., -fringe:, :] = fill_val
+
+		return img
+
+	def _apply_border_jitter(self, img: torch.Tensor, vesselness: torch.Tensor):
+		i, j, h, w = transforms.RandomCrop.get_params(
+			img,
+			output_size=(self.border_jitter_size, self.border_jitter_size),
+		)
+		img_crop = TF.crop(img, i, j, h, w)
+		vessel_crop = TF.crop(vesselness, i, j, h, w)
+		img_crop = TF.resize(
+			img_crop,
+			[self.img_size, self.img_size],
+			interpolation=transforms.InterpolationMode.BICUBIC,
+			antialias=True,
+		)
+		vessel_crop = TF.resize(
+			vessel_crop,
+			[self.img_size, self.img_size],
+			interpolation=transforms.InterpolationMode.BILINEAR,
+			antialias=True,
+		)
+		return img_crop, vessel_crop
+
+	def _sample_resized_crop_params(self, img: torch.Tensor, scale):
+		return transforms.RandomResizedCrop.get_params(img, scale=scale, ratio=self.crop_ratio)
+
+	def _crop_and_resize(self, img: torch.Tensor, params, interpolation=transforms.InterpolationMode.BICUBIC):
+		i, j, h, w = params
+		crop = TF.crop(img, i, j, h, w)
+		return TF.resize(
+			crop,
+			[self.img_size, self.img_size],
+			interpolation=interpolation,
+			antialias=True,
+		)
+
+	def _crop_vessel_score(self, vesselness: torch.Tensor, params) -> float:
+		i, j, h, w = params
+		crop = vesselness[..., i : i + h, j : j + w]
+		return float(crop.mean().item())
+
+	def _guided_crop(
+		self,
+		img: torch.Tensor,
+		vesselness: torch.Tensor,
+		mode: str,
+		scale,
+		threshold: float,
+		max_retries: int,
+	):
+		if mode not in ("vessel", "background"):
+			raise ValueError(f"Unknown local crop mode: {mode}")
+
+		best_params = None
+		best_score = -1.0 if mode == "vessel" else float("inf")
+		accepted = False
+		tries_used = 0
+
+		for attempt in range(max_retries):
+			params = self._sample_resized_crop_params(img, scale)
+			score = self._crop_vessel_score(vesselness, params)
+			tries_used = attempt + 1
+
+			if mode == "vessel":
+				if score > best_score:
+					best_score = score
+					best_params = params
+				if score >= threshold:
+					accepted = True
+					best_params = params
+					best_score = score
+					break
+			else:
+				if score < best_score:
+					best_score = score
+					best_params = params
+				if score <= threshold:
+					accepted = True
+					best_params = params
+					best_score = score
+					break
+
+		crop = self._crop_and_resize(img, best_params)
+		return crop, best_params, best_score, accepted, tries_used
+
+	def __call__(self, img: torch.Tensor, vesselness: torch.Tensor):
+		img = self._fill_fov_border(img)
+		vesselness = vesselness.clamp(0.0, 1.0)
+		crops = []
+		crop_stats = []
+		global_pairs = []
+		for g_idx in range(self.num_global_crops):
+			jitter_img, jitter_vessel = self._apply_border_jitter(img, vesselness)
+			global_img, g_params, g_score, g_accepted, g_tries = self._guided_crop(
+				jitter_img,
+				jitter_vessel,
+				mode="vessel",
+				scale=self.global_scale,
+				threshold=self.global_vessel_threshold,
+				max_retries=self.max_global_retries,
+			)
+			global_vessel = self._crop_and_resize(
+				jitter_vessel,
+				g_params,
+				interpolation=transforms.InterpolationMode.BILINEAR,
+			)
+			global_vessel = global_vessel.clamp(0.0, 1.0)
+			global_pairs.append((global_img, global_vessel))
+			crops.append(global_img)
+			crop_stats.append(
+				{
+					"kind": "global",
+					"mode": "vessel",
+					"score": g_score,
+					"accepted": g_accepted,
+					"tries": g_tries,
+					"parent_global": g_idx,
+				}
+			)
+
+		n_vessel = int(round(self.num_local_crops * self.local_vessel_fraction))
+		n_vessel = min(self.num_local_crops, max(0, n_vessel))
+		n_background = self.num_local_crops - n_vessel
+		local_modes = ["vessel"] * n_vessel + ["background"] * n_background
+		random.shuffle(local_modes)
+
+		# Local crops are explicitly sampled INSIDE one of the existing global crops.
+		for local_mode in local_modes:
+			parent_idx = random.randrange(len(global_pairs))
+			parent_img, parent_vessel = global_pairs[parent_idx]
+			threshold = self.local_threshold if local_mode == "vessel" else self.background_threshold
+			crop, _, score, accepted, tries = self._guided_crop(
+				parent_img,
+				parent_vessel,
+				mode=local_mode,
+				scale=self.local_scale,
+				threshold=threshold,
+				max_retries=self.max_local_retries,
+			)
+			crops.append(crop)
+			crop_stats.append(
+				{
+					"kind": "local-guided",
+					"mode": local_mode,
+					"score": score,
+					"accepted": accepted,
+					"tries": tries,
+					"parent_global": parent_idx,
+				}
+			)
+		return crops, crop_stats
+
+
+def _resolve_image_path(workspace_root: Path, json_path: Path, rel_path: str) -> Path:
+	candidates = [
+		workspace_root / rel_path,
+		json_path.parent / rel_path,
+		json_path.parent.parent / rel_path,
+	]
+	for p in candidates:
+		if p.exists():
+			return p
+	raise FileNotFoundError(f"Could not resolve image path '{rel_path}' from dataset json.")
+
+
+def _collect_patients(dataset_json: Path, split: str = "train"):
+	with dataset_json.open("r", encoding="utf-8") as f:
+		data = json.load(f)
+
+	if split not in data:
+		raise ValueError(f"Split '{split}' not found in {dataset_json}.")
+
+	entries = []
+	for source_name, source_data in data[split].items():
+		if not isinstance(source_data, dict):
+			continue
+		for patient_id, sample in source_data.items():
+			image_rel = sample.get("data")
+			if isinstance(image_rel, str) and image_rel:
+				entries.append(
+					{
+						"patient_id": patient_id,
+						"source": source_name,
+						"image_rel": image_rel,
+					}
+				)
+
+	if not entries:
+		raise RuntimeError("No patients with valid image paths were found.")
+
+	return entries
+
+
+def _to_tensor_for_cropper(img_pil: Image.Image) -> torch.Tensor:
+	arr = np.array(img_pil.convert("L"), dtype=np.float32) / 255.0
+	tensor = torch.from_numpy(arr).unsqueeze(0)
+	tensor = (tensor - 0.5) / 0.5
+	return tensor
+
+
+def _to_numpy_display(img_tensor: torch.Tensor) -> np.ndarray:
+	arr = img_tensor.squeeze(0).detach().cpu().numpy()
+	arr = (arr * 0.5) + 0.5
+	return np.clip(arr, 0.0, 1.0)
+
+
+def _largest_component_mask(mask_u8: np.ndarray) -> np.ndarray:
+	n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+	if n_labels <= 1:
+		return mask_u8
+	areas = stats[1:, cv2.CC_STAT_AREA]
+	best = 1 + int(np.argmax(areas))
+	out = np.zeros_like(mask_u8, dtype=np.uint8)
+	out[labels == best] = 255
+	return out
+
+
+def _filter_border_components(
+	binary_mask: np.ndarray,
+	fov_mask: np.ndarray,
+	border_px: int = 2,
+	max_touch_ratio: float = 0.35,
+	min_area: int = 12,
+) -> np.ndarray:
+	"""Remove components dominated by border pixels while preserving edge-crossing vessels."""
+	bm = (binary_mask > 0).astype(np.uint8)
+	n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bm, connectivity=8)
+	if n_labels <= 1:
+		return bm.astype(np.float32)
+
+	h, w = bm.shape
+	img_border = np.zeros_like(bm, dtype=bool)
+	img_border[:border_px, :] = True
+	img_border[-border_px:, :] = True
+	img_border[:, :border_px] = True
+	img_border[:, -border_px:] = True
+
+	fov_u8 = (fov_mask > 0.5).astype(np.uint8) * 255
+	eroded = cv2.erode(fov_u8, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=1)
+	fov_ring = (fov_u8 > 0) & (eroded == 0)
+
+	keep = np.zeros_like(bm, dtype=np.uint8)
+	for label_id in range(1, n_labels):
+		area = int(stats[label_id, cv2.CC_STAT_AREA])
+		if area < min_area:
+			continue
+
+		component = labels == label_id
+		touch_img = np.count_nonzero(component & img_border)
+		touch_ring = np.count_nonzero(component & fov_ring)
+
+		img_ratio = touch_img / (area + 1e-8)
+		ring_ratio = touch_ring / (area + 1e-8)
+
+		# Keep elongated vessel components that only partially touch edges;
+		# drop components mostly explained by border/frame transitions.
+		if img_ratio > max_touch_ratio:
+			continue
+		if ring_ratio > 0.85 and area < 180:
+			continue
+
+		keep[component] = 1
+
+	return keep.astype(np.float32)
+
+
+def _valid_fov_mask(img_u8: np.ndarray, img_size: int) -> np.ndarray:
+	"""Build a robust mask of valid imaging area to suppress border/frame artefacts."""
+	resized = cv2.resize(img_u8, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
+	blur = cv2.GaussianBlur(resized, (9, 9), 0)
+
+	# Most edge artefacts are near black outside the circular FOV.
+	_, mask = cv2.threshold(blur, 8, 255, cv2.THRESH_BINARY)
+	mask = _largest_component_mask(mask)
+
+	k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+	mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+
+	# Gentle erosion to reduce border gradients without removing near-edge vessels.
+	k_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+	mask = cv2.erode(mask, k_erode, iterations=1)
+	return (mask > 0).astype(np.float32)
+
+
+def _fov_boundary_weight(fov_mask: np.ndarray, fade_px: float = 14.0) -> np.ndarray:
+	"""Create a soft weight: 0 at FOV boundary, 1 deeper inside the valid region."""
+	mask_u8 = (fov_mask > 0.5).astype(np.uint8) * 255
+	dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 3).astype(np.float32)
+	weight = np.clip(dist / max(fade_px, 1.0), 0.0, 1.0)
+	return weight * fov_mask
+
+
+def _frame_line_suppression_weight(img_u8: np.ndarray, img_size: int) -> np.ndarray:
+	"""Detect long horizontal/vertical frame lines and down-weight Frangi there."""
+	resized = cv2.resize(img_u8, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
+	blur = cv2.GaussianBlur(resized, (5, 5), 0)
+	edges = cv2.Canny(blur, threshold1=40, threshold2=120)
+
+	line_mask = np.zeros_like(edges, dtype=np.uint8)
+	lines = cv2.HoughLinesP(
+		edges,
+		rho=1,
+		theta=np.pi / 180.0,
+		threshold=40,
+		minLineLength=int(0.35 * img_size),
+		maxLineGap=6,
+	)
+
+	if lines is not None:
+		for l in lines[:, 0, :]:
+			x1, y1, x2, y2 = [int(v) for v in l]
+			dx = x2 - x1
+			dy = y2 - y1
+			angle = abs(np.degrees(np.arctan2(dy, dx + 1e-8)))
+			# Frame edges are usually close to horizontal or vertical.
+			if angle < 12.0 or angle > 78.0:
+				cv2.line(line_mask, (x1, y1), (x2, y2), 255, thickness=2)
+
+	# Dilate to cover the full bright/dark border band around detected frame lines.
+	line_mask = cv2.dilate(line_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1)
+	line_mask_f = (line_mask > 0).astype(np.float32)
+
+	# Soft suppression: keep 20% response on detected frame lines, full response elsewhere.
+	weight = 1.0 - 0.8 * line_mask_f
+	return np.clip(weight, 0.2, 1.0)
+
+
+def _frangi_response_from_pil(img_pil: Image.Image, img_size: int) -> np.ndarray:
+	img_np = np.array(img_pil.convert("L"), dtype=np.uint8)
+	fov_mask = _valid_fov_mask(img_np, img_size)
+	fov_weight = _fov_boundary_weight(fov_mask, fade_px=14.0)
+	frame_weight = _frame_line_suppression_weight(img_np, img_size)
+	img_np = cv2.GaussianBlur(img_np, (7, 7), sigmaX=3)
+	pad = 16
+	if img_np.shape[0] > 2 * pad and img_np.shape[1] > 2 * pad:
+		img_np = img_np[pad:-pad, pad:-pad]
+	img_np = cv2.resize(img_np, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
+
+	# Fill outside FOV with median inside FOV to avoid edge gradients before Frangi.
+	inside_vals = img_np[fov_mask > 0.5]
+	fill = float(np.median(inside_vals)) if inside_vals.size else float(np.median(img_np))
+	img_np = img_np.astype(np.float32)
+	img_np[fov_mask <= 0.5] = fill
+
+	img_f = img_np
+	img_f = (img_f - img_f.min()) / (img_f.max() - img_f.min() + 1e-8)
+
+	vesselness = frangi(
+		img_f,
+		sigmas=range(1, 16, 2),
+		alpha=0.5,
+		beta=1,
+		gamma=10,
+		mode="reflect",
+		black_ridges=True,
+	)
+
+	p_low, p_high = np.percentile(vesselness, (1, 99.9))
+	vesselness_clip = np.clip(vesselness, p_low, p_high)
+	v_norm = (vesselness_clip - p_low) / (p_high - p_low + 1e-8)
+
+	vesselness_enhanced = np.power(v_norm, 0.5)
+	vessel_mask = (v_norm > 0.045).astype(np.float32)
+	vessel_mask = vessel_mask * fov_mask
+	vessel_mask = _filter_border_components(vessel_mask, fov_mask=fov_mask, border_px=2)
+	vesselness_final = vesselness_enhanced * vessel_mask * fov_weight * frame_weight
+	vesselness_final = cv2.GaussianBlur(vesselness_final, (3, 3), 0)
+
+	return np.clip(vesselness_final, 0.0, 1.0)
+
+
+def main():
+	parser = argparse.ArgumentParser(
+		description="Plot LeJepa global/local crops for 4 random patients."
+	)
+	parser.add_argument(
+		"--dataset_json",
+		type=str,
+		default="data/ARCADE/processed/dataset.json",
+		help="Path to dataset json.",
+	)
+	parser.add_argument(
+		"--split",
+		type=str,
+		default="train",
+		help="Dataset split to sample from.",
+	)
+	parser.add_argument(
+		"--num_patients",
+		type=int,
+		default=4,
+		help="How many random patients to plot.",
+	)
+	parser.add_argument(
+		"--img_size",
+		type=int,
+		default=256,
+		help="Output crop size used by LeJepa augmentation.",
+	)
+	parser.add_argument(
+		"--seed",
+		type=int,
+		default=42,
+		help="Random seed for patient sampling.",
+	)
+	parser.add_argument(
+		"--output",
+		type=str,
+		default="results/lejepa_crops_random_patients.png",
+		help="Where to save the figure.",
+	)
+	parser.add_argument(
+		"--output_frangi",
+		type=str,
+		default="results/frangi_random_patients.png",
+		help="Where to save the Frangi response figure.",
+	)
+	parser.add_argument(
+		"--local_vessel_threshold",
+		type=float,
+		default=0.02,
+		help="Minimum mean Frangi vesselness required to accept a local crop.",
+	)
+	parser.add_argument(
+		"--global_vessel_threshold",
+		type=float,
+		default=0.015,
+		help="Minimum mean Frangi vesselness required to accept a global crop.",
+	)
+	parser.add_argument(
+		"--local_num_crops",
+		type=int,
+		default=4,
+		help="Number of local crops (default 4 gives exact 3/4 vessel + 1/4 background).",
+	)
+	parser.add_argument(
+		"--local_background_threshold",
+		type=float,
+		default=0.01,
+		help="Maximum mean Frangi vesselness required to accept a background local crop.",
+	)
+	parser.add_argument(
+		"--local_max_retries",
+		type=int,
+		default=20,
+		help="Maximum rejection-sampling retries for each local crop.",
+	)
+	args = parser.parse_args()
+
+	workspace_root = Path(__file__).resolve().parent
+	dataset_json = (workspace_root / args.dataset_json).resolve()
+	if not dataset_json.exists():
+		raise FileNotFoundError(f"Dataset json not found: {dataset_json}")
+
+	patients = _collect_patients(dataset_json=dataset_json, split=args.split)
+	if len(patients) < args.num_patients:
+		raise ValueError(
+			f"Requested {args.num_patients} patients, but split '{args.split}' has only {len(patients)} entries."
+		)
+
+	random.seed(args.seed)
+	sampled = random.sample(patients, args.num_patients)
+
+	cropper = LeJepaCropper(
+		img_size=args.img_size,
+		num_local_crops=args.local_num_crops,
+		local_threshold=args.local_vessel_threshold,
+		background_threshold=args.local_background_threshold,
+		global_vessel_threshold=args.global_vessel_threshold,
+		max_local_retries=args.local_max_retries,
+	)
+
+	sample_records = []
+	for sample in sampled:
+		image_path = _resolve_image_path(workspace_root, dataset_json, sample["image_rel"])
+		img_pil = Image.open(image_path).convert("L")
+		img_tensor = _to_tensor_for_cropper(img_pil)
+		frangi_resp = _frangi_response_from_pil(img_pil, img_size=args.img_size)
+		frangi_tensor = torch.from_numpy(frangi_resp).unsqueeze(0).float()
+		crops, crop_stats = cropper(img_tensor, frangi_tensor)
+		sample_records.append(
+			{
+				"sample": sample,
+				"img_tensor": img_tensor,
+				"frangi_resp": frangi_resp,
+				"crops": crops,
+				"crop_stats": crop_stats,
+			}
+		)
+
+	global_cols = [f"Global {i+1}" for i in range(cropper.num_global_crops)]
+	local_cols = [f"Guided Local {i+1}" for i in range(cropper.num_local_crops)]
+	cols = ["Original", "Frangi"] + global_cols + local_cols
+	fig, axes = plt.subplots(args.num_patients, len(cols), figsize=(2.7 * len(cols), 3.8 * args.num_patients))
+	if args.num_patients == 1:
+		axes = np.expand_dims(axes, axis=0)
+
+	for row, record in enumerate(sample_records):
+		sample = record["sample"]
+		images_to_plot = [record["img_tensor"], torch.from_numpy(record["frangi_resp"]).unsqueeze(0).float()] + record["crops"]
+		for col, image_tensor in enumerate(images_to_plot):
+			ax = axes[row, col]
+			if col == 1:
+				ax.imshow(image_tensor.squeeze(0).numpy(), cmap="gray", vmin=0.0, vmax=1.0)
+			else:
+				ax.imshow(_to_numpy_display(image_tensor), cmap="gray", vmin=0.0, vmax=1.0)
+			ax.axis("off")
+			if row == 0:
+				ax.set_title(cols[col], fontsize=11)
+			if col >= 2:
+				stat = record["crop_stats"][col - 2]
+				label = f"v={stat['score']:.3f}"
+				if stat["kind"] == "local-guided":
+					status = "ok" if stat["accepted"] else "best"
+					parent = stat.get("parent_global", 0) + 1
+					mode = stat.get("mode", "vessel")
+					mode_short = "ves" if mode == "vessel" else "bg"
+					label = f"{label} | {mode_short} | {status} | t={stat['tries']} | g={parent}"
+				ax.set_xlabel(label, fontsize=8)
+
+		axes[row, 0].set_ylabel(
+			f"{sample['source']}\\nID {sample['patient_id']}",
+			fontsize=10,
+			rotation=0,
+			labelpad=35,
+			va="center",
+		)
+
+	fig.suptitle(
+		f"Frangi-Guided LeJepa Cropping: {cropper.num_global_crops} Global (vessel) + "
+		f"{cropper.num_local_crops} Local (3/4 vessel, 1/4 background)",
+		fontsize=14,
+	)
+	plt.tight_layout(rect=[0, 0, 1, 0.98])
+
+	output_path = (workspace_root / args.output).resolve()
+	output_path.parent.mkdir(parents=True, exist_ok=True)
+	fig.savefig(output_path, dpi=200)
+	print(f"Saved crop visualization to: {output_path}")
+
+	fig_f, axes_f = plt.subplots(args.num_patients, 2, figsize=(7, 3.8 * args.num_patients))
+	if args.num_patients == 1:
+		axes_f = np.expand_dims(axes_f, axis=0)
+
+	for row, record in enumerate(sample_records):
+		sample = record["sample"]
+		img_disp = _to_numpy_display(record["img_tensor"])
+		frangi_resp = record["frangi_resp"]
+
+		axes_f[row, 0].imshow(img_disp, cmap="gray", vmin=0.0, vmax=1.0)
+		axes_f[row, 0].axis("off")
+		axes_f[row, 1].imshow(frangi_resp, cmap="gray", vmin=0.0, vmax=1.0)
+		axes_f[row, 1].axis("off")
+
+		if row == 0:
+			axes_f[row, 0].set_title("Original", fontsize=11)
+			axes_f[row, 1].set_title("Frangi Response", fontsize=11)
+
+		axes_f[row, 0].set_ylabel(
+			f"{sample['source']}\\nID {sample['patient_id']}",
+			fontsize=10,
+			rotation=0,
+			labelpad=35,
+			va="center",
+		)
+
+	fig_f.suptitle("Frangi Vesselness on Same Random Patients", fontsize=14)
+	plt.tight_layout(rect=[0, 0, 1, 0.98])
+
+	output_frangi_path = (workspace_root / args.output_frangi).resolve()
+	output_frangi_path.parent.mkdir(parents=True, exist_ok=True)
+	fig_f.savefig(output_frangi_path, dpi=200)
+	print(f"Saved Frangi visualization to: {output_frangi_path}")
 
 
 if __name__ == "__main__":
-    run_convnext_gradcam()
-
+	main()

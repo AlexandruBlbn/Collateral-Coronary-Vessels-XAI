@@ -1,5 +1,6 @@
 import os
 import sys
+import copy
 import yaml
 import torch
 import torch.nn as nn
@@ -21,6 +22,8 @@ import numpy as np
 import random
 import gc
 import matplotlib.cm as cm
+import cv2
+import math
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, '..'))
@@ -62,184 +65,319 @@ def configCreate(path, config):
     with open(path, 'w') as f:
         yaml.dump(config, f)
 
+# ==========================================
+# 1. GPU-Accelerated Frangi Filter (PyTorch)
+# ==========================================
+def frangi_2d_torch(image: torch.Tensor, sigmas=[1.0, 3.0, 5.0], alpha=0.5, beta=1.0, gamma=10.0, black_ridges=True):
+    """
+    Native PyTorch implementation of 2D Frangi Vesselness Filter.
+    Computes analytical eigenvalues of the Hessian matrix for extreme speed on GPU.
+    image: (B, 1, H, W) float tensor
+    """
+    B, C, H, W = image.shape
+    vesselness = torch.zeros_like(image)
+    
+    for sigma in sigmas:
+        # Create Gaussian derivative kernels
+        size = int(2 * round(3 * sigma) + 1)
+        x = torch.arange(size, dtype=torch.float32, device=image.device) - size // 2
+        y = x.view(-1, 1)
+        x = x.view(1, -1)
+        
+        # Gaussian formula
+        g = torch.exp(-(x**2 + y**2) / (2 * sigma**2)) / (2 * math.pi * sigma**2)
+        
+        # Derivatives
+        g_x = -x / (sigma**2) * g
+        g_y = -y / (sigma**2) * g
+        g_xx = (x**2 / sigma**4 - 1 / sigma**2) * g
+        g_yy = (y**2 / sigma**4 - 1 / sigma**2) * g
+        g_xy = (x * y / sigma**4) * g
+        
+        # Reshape for conv2d
+        k_xx = g_xx.view(1, 1, size, size)
+        k_yy = g_yy.view(1, 1, size, size)
+        k_xy = g_xy.view(1, 1, size, size)
+        
+        # Calculate Hessian components (Dxx, Dyy, Dxy)
+        pad = size // 2
+        Dxx = F.conv2d(image, k_xx, padding=pad)
+        Dyy = F.conv2d(image, k_yy, padding=pad)
+        Dxy = F.conv2d(image, k_xy, padding=pad)
+        
+        # Analytical Eigenvalues of 2x2 matrix
+        # Matrix: [[Dxx, Dxy], [Dxy, Dyy]]
+        trace = Dxx + Dyy
+        det = Dxx * Dyy - Dxy**2
+        
+        # Lambda1 and Lambda2 calculation
+        sqrt_term = torch.sqrt((trace**2) / 4 - det + 1e-8)
+        L1 = trace / 2 + sqrt_term
+        L2 = trace / 2 - sqrt_term
+        
+        # Sort eigenvalues by absolute magnitude: |L1| <= |L2|
+        mask_sort = torch.abs(L1) > torch.abs(L2)
+        lambda1 = torch.where(mask_sort, L2, L1)
+        lambda2 = torch.where(mask_sort, L1, L2)
+        
+        # Frangi features
+        Rb = torch.abs(lambda1) / (torch.abs(lambda2) + 1e-8)
+        S = torch.sqrt(lambda1**2 + lambda2**2)
+        
+        # Vesselness equation
+        exp_Rb = torch.exp(-(Rb**2) / (2 * alpha**2))
+        exp_S = 1.0 - torch.exp(-(S**2) / (2 * gamma**2))
+        
+        v_sigma = exp_Rb * exp_S
+        
+        # Black ridges (blood vessels in X-ray are dark) -> we look for positive lambda2
+        if black_ridges:
+            v_sigma = torch.where(lambda2 > 0, v_sigma, torch.zeros_like(v_sigma))
+        else:
+            v_sigma = torch.where(lambda2 < 0, v_sigma, torch.zeros_like(v_sigma))
+            
+        vesselness = torch.max(vesselness, v_sigma)
+        
+    return vesselness
+
+# ==========================================
+# 2. Hierarchical Augmentation Pipeline
+# ==========================================
 class augmentariLeJepa(nn.Module):
-    """
-    Fully label-free multi-crop augmentation.
-
-    Strategic change from original:
-      OLD local scale: (0.05, 0.6)  — 5% minimum ≈ ~57px crop, vessels missed ~90% of the time
-      NEW local scale: (0.4,  0.8)  — 40% minimum ≈ ~102px crop, always captures macroscopic
-                                       cardiac structures and a large fraction of the vessel tree
-
-    With 40-80% crops every local view substantially overlaps with the global view.
-    The invariance objective then forces the model to learn WHAT is structurally consistent
-    across those partially overlapping views, which in angiography is the vessel tree —
-    not the background or catheter (which appear at different positions across crops).
-    No labels, no pseudolabels required.
-    """
-    def __init__(self, img_size=224):
+    def __init__(
+        self,
+        img_size=256,
+        num_global_crops=2,
+        num_local_crops=4,
+        global_scale=(0.7, 1.0),
+        local_scale=(0.10, 0.25), # Adjusted to true JEPA local scales
+        global_vessel_threshold=0.015,
+        local_vessel_threshold=0.02,
+        local_background_threshold=0.01,
+        max_global_retries=12,
+        max_local_retries=20,
+    ):
         super().__init__()
         self.img_size = img_size
-        # BorderJitter: randomly crops 5-15% from each side before the main crop.
-        # Angiography images have a circular FOV: the corners are always black.
-        # Without this, BOTH global views often contain the same border transition
-        # at the same spatial position → invariance loss uses it as a free shortcut.
-        # By randomly varying which portion of the border is included in each view,
-        # the border becomes INCONSISTENT across views and cannot be exploited.
-        self.BorderJitter = transforms.Compose([
-            transforms.RandomCrop(
-                int(img_size * 0.88),   # removes ~12% worst-case border per side
-                pad_if_needed=True,
-                fill=0
-            ),
-            transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC, antialias=True),
-        ])
-        self.Global_Crops = transforms.RandomResizedCrop(
-            img_size, scale=(0.7, 1.0), interpolation=transforms.InterpolationMode.BICUBIC
-        )
-        self.Local_Crops = transforms.RandomResizedCrop(
-            img_size, scale=(0.4, 0.8), interpolation=transforms.InterpolationMode.BICUBIC
-        )
-        # ElasticTransform: locally warps each crop independently.
-        # Catheters/guide-wires are straight, high-contrast lines — consistent across
-        # un-augmented crops and therefore easy invariance shortcuts. After elastic
-        # deformation they appear differently curved in different views → inconsistent
-        # → unusable as an invariance target. Vessel structure (tortuous, distributed)
-        # survives mild elastic deformation better than thin straight instruments.
+        self.num_global_crops = num_global_crops
+        self.num_local_crops = num_local_crops
+        self.local_vessel_fraction = 0.75
+        self.global_scale = global_scale
+        self.local_scale = local_scale
+        self.crop_ratio = (3.0 / 4.0, 4.0 / 3.0)
+        self.global_vessel_threshold = global_vessel_threshold
+        self.local_vessel_threshold = local_vessel_threshold
+        self.local_background_threshold = local_background_threshold
+        self.max_global_retries = max_global_retries
+        self.max_local_retries = max_local_retries
+
+        self.BorderJitterSize = int(img_size * 0.88)
         self.elastic = transforms.ElasticTransform(alpha=60.0, sigma=6.0)
 
     def _apply_stochastic_aug(self, crop: torch.Tensor) -> torch.Tensor:
-        # Per-crop random flips: the catheter/instrument always enters from one edge
-        # (typically top-center) in angiography. Without per-crop flips, all 5 views
-        # of an image share the same catheter entry direction → stable spatial shortcut.
-        # Flipping independently per-crop makes position inconsistent across views.
         if torch.rand(1).item() < 0.5:
             crop = TF.hflip(crop)
         if torch.rand(1).item() < 0.5:
             crop = TF.vflip(crop)
-        # Inversion REMOVED: at p=0.5 most angiography frames (which are predominantly
-        # dark) become nearly white after negation. The backbone then has to reconcile
-        # a normal-contrast view with a photographic-negative view — the only invariant
-        # features are structural positions, but the vessel/background contrast polarity
-        # (the primary vessel cue) is completely destroyed. Both per-crop flips and
-        # BorderJitter already make brightness-polarity shortcuts inconsistent across
-        # views without inverting the diagnostic content.
         if torch.rand(1).item() < 0.3:
             crop = self.elastic(crop)
         return crop
 
-    @staticmethod
-    def _fill_fov_border(img: torch.Tensor) -> torch.Tensor:
-        """
-        Replace circular-FOV black border pixels AND bright edge bands with mean intensity.
+    def _get_random_crop_params_inside(self, parent_h, parent_w, scale):
+        target_area = parent_h * parent_w * random.uniform(scale[0], scale[1])
+        aspect_ratio = random.uniform(self.crop_ratio[0], self.crop_ratio[1])
+        
+        h = int(round((target_area * aspect_ratio) ** 0.5))
+        w = int(round((target_area / aspect_ratio) ** 0.5))
+        h, w = min(h, parent_h), min(w, parent_w)
+        
+        i = random.randint(0, parent_h - h)
+        j = random.randint(0, parent_w - w)
+        return i, j, h, w
 
-        TWO shortcuts are handled:
+    def __call__(self, batch_img: torch.Tensor):
+        # Assumes batch_img is on GPU: (B, 1, H, W)
+        B, C, H, W = batch_img.shape
+        
+        # 1. Fast GPU Frangi Response
+        with torch.no_grad():
+            normalized_img = (batch_img * 0.5 + 0.5).clamp(0, 1)
+            vessel_batch = frangi_2d_torch(normalized_img, sigmas=[1.0, 3.0, 5.0], gamma=5.0)
+            
+            # Simple normalization of vesselness
+            v_max = vessel_batch.view(B, -1).max(dim=1, keepdim=True)[0].view(B, 1, 1, 1)
+            vessel_batch = vessel_batch / (v_max + 1e-8)
 
-        1. DARK corners (< -0.85): circular FOV mask outside the sensor circle.
-           Both augmented views share black corners at the same position → free shortcut.
+        global_views = [[] for _ in range(self.num_global_crops)]
+        local_views = [[] for _ in range(self.num_local_crops)]
+        local_parent_idx = [[] for _ in range(self.num_local_crops)]
+        local_boxes = [[] for _ in range(self.num_local_crops)]
 
-        2. BRIGHT top/bottom bands (> 0.7 in top/bottom 8% of rows): vendor-imprinted
-           frame borders, imaging metadata strips, or reconstruction artefacts that appear
-           as a brighter horizontal band at the image edge. GradCAM at epoch 17 shows
-           activations locked on the top edge in images where the catheter entry and
-           coronary origin are also at the top — the model conflates the bright band with
-           the real structure. Filling it with the mean removes the per-image consistent
-           spatial anchor so per-crop flips can fully decorrelate this region.
-        """
-        img = img.clone()
-        fill_val = img.mean()
+        for b in range(B):
+            img = batch_img[b]
+            vessel = vessel_batch[b]
 
-        # 1. Dark FOV corners
-        border_mask = img < -0.85
-        if border_mask.float().mean() >= 0.01:
-            img[border_mask] = fill_val
+            parents = []
+            # --- GLOBAL CROPS ---
+            for g in range(self.num_global_crops):
+                best_g_params = (0, 0, H, W)
+                for _ in range(self.max_global_retries):
+                    i, j, h, w = transforms.RandomResizedCrop.get_params(img, scale=self.global_scale, ratio=self.crop_ratio)
+                    score = vessel[..., i:i+h, j:j+w].mean().item()
+                    if score >= self.global_vessel_threshold:
+                        best_g_params = (i, j, h, w)
+                        break
+                
+                g_i, g_j, g_h, g_w = best_g_params
+                g_img = TF.crop(img, g_i, g_j, g_h, g_w)
+                g_img_resized = TF.resize(g_img, [self.img_size, self.img_size], antialias=True)
+                g_img_aug = self._apply_stochastic_aug(g_img_resized)
+                
+                global_views[g].append(g_img_aug)
+                parents.append((g_i, g_j, g_h, g_w))
 
-        # 2. Bright top/bottom edge bands
-        H = img.shape[-2]
-        fringe = max(1, int(H * 0.08))          # top and bottom 8% of rows
-        top_band    = img[..., :fringe, :]
-        bottom_band = img[..., -fringe:, :]
-        if (top_band > 0.7).float().mean() > 0.35:      # >35% pixels very bright → vendor strip
-            img[..., :fringe, :] = fill_val
-        if (bottom_band > 0.7).float().mean() > 0.35:
-            img[..., -fringe:, :] = fill_val
+            # --- LOCAL CROPS (Sampled strictly inside global crops) ---
+            n_vessel = int(round(self.num_local_crops * self.local_vessel_fraction))
+            modes = ['vessel'] * n_vessel + ['background'] * (self.num_local_crops - n_vessel)
+            random.shuffle(modes)
 
-        return img
+            for l, mode in enumerate(modes):
+                p_idx = random.randrange(len(parents))
+                g_i, g_j, g_h, g_w = parents[p_idx]
+                
+                best_l_params = (0, 0, g_h, g_w)
+                best_score = -1.0 if mode == 'vessel' else float('inf')
+                
+                for _ in range(self.max_local_retries):
+                    l_i, l_j, l_h, l_w = self._get_random_crop_params_inside(g_h, g_w, self.local_scale)
+                    abs_i, abs_j = g_i + l_i, g_j + l_j
+                    score = vessel[..., abs_i:abs_i+l_h, abs_j:abs_j+l_w].mean().item()
+                    
+                    if mode == 'vessel':
+                        if score > best_score:
+                            best_score, best_l_params = score, (abs_i, abs_j, l_h, l_w)
+                        if score >= self.local_vessel_threshold:
+                            break
+                    else:
+                        if score < best_score:
+                            best_score, best_l_params = score, (abs_i, abs_j, l_h, l_w)
+                        if score <= self.local_background_threshold:
+                            break
 
-    def __call__(self, img: torch.Tensor):
-        # 1. Remove circular FOV border (shared across all views — eliminates that shortcut).
-        img = self._fill_fov_border(img)
-        crops = []
-        # 2. Each crop gets its own independent stochastic augmentation AFTER cropping,
-        #    so the same shortcut feature (catheter angle, brightness) appears differently
-        #    across views and cannot be used to minimise the invariance loss.
-        for _ in range(2):
-            c = self.Global_Crops(self.BorderJitter(img))
-            crops.append(self._apply_stochastic_aug(c))
-        for _ in range(3):
-            c = self.Local_Crops(self.BorderJitter(img))
-            crops.append(self._apply_stochastic_aug(c))
-        return crops
+                abs_i, abs_j, l_h, l_w = best_l_params
+                c_img = TF.crop(img, abs_i, abs_j, l_h, l_w)
+                c_img_resized = TF.resize(c_img, [self.img_size, self.img_size], antialias=True)
+                c_img_aug = self._apply_stochastic_aug(c_img_resized)
+                
+                # Calculate bounding box coordinates RELATIVE to the parent global crop (Normalized 0-1)
+                rel_y = (abs_i - g_i) / g_h
+                rel_x = (abs_j - g_j) / g_w
+                rel_h = l_h / g_h
+                rel_w = l_w / g_w
+
+                local_views[l].append(c_img_aug)
+                local_parent_idx[l].append(p_idx)
+                local_boxes[l].append([rel_y, rel_x, rel_h, rel_w])
+
+        global_views = [torch.stack(v, dim=0) for v in global_views]
+        local_views = [torch.stack(v, dim=0) for v in local_views]
+        parent_tensor = torch.tensor(local_parent_idx, dtype=torch.long, device=batch_img.device)
+        box_tensor = torch.tensor(local_boxes, dtype=torch.float32, device=batch_img.device)
+        
+        return {
+            'global_crops': global_views,
+            'local_crops': local_views,
+            'local_parent_idx': parent_tensor,
+            'local_boxes': box_tensor,
+        }
+
+# ==========================================
+# 3. Model Architecture & Spatial Predictor
+# ==========================================
+class JepaPredictor(nn.Module):
+    def __init__(self, proj_dim: int, spatial_tokens_total: int, hidden_dim: int = 512):
+        super().__init__()
+        # Flattening the context map: spatial_tokens_total is S*S (e.g., 4x4=16)
+        in_features = (spatial_tokens_total * proj_dim) + hidden_dim
+        
+        self.coord_mlp = nn.Sequential(
+            nn.Linear(4, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.pred = nn.Sequential(
+            nn.Linear(in_features, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, proj_dim),
+        )
+
+    def forward(self, context_tokens: torch.Tensor, boxes: torch.Tensor) -> torch.Tensor:
+        # context_tokens: (B, S*S, D) -> Flatten to preserve spatial grid mapping
+        B = context_tokens.size(0)
+        ctx_flat = context_tokens.reshape(B, -1) # (B, S*S*D)
+        
+        box_feat = self.coord_mlp(boxes)         # (B, hidden_dim)
+        return self.pred(torch.cat([ctx_flat, box_feat], dim=-1)) # Output: (B, D)
 
 class LeJepaModel(nn.Module):
-    """
-    Dense spatial projection instead of global average pool.
-
-    WHY: Global average pool collapses the (B, C, h, w) feature map to a single (B, C)
-    vector. For segmentation, two crops may contain very different spatial arrangements
-    of vessels; their global-average embeddings will differ even if local vessel features
-    are consistent. This makes the invariance loss push the backbone toward global
-    image-level descriptors ("this looks like a cardiac image") rather than local
-    spatial descriptors ("here there is a vessel branch").
-
-    FIX: Use AdaptiveAvgPool2d(spatial_tokens) to produce S×S spatial tokens per image
-    (default S=4, giving 16 tokens). Each token represents a spatial region. Invariance
-    is computed per-token across views, forcing the backbone to learn what is spatially
-    consistent within corresponding regions — which is vessel structure.
-    """
-    def __init__(self, encoder_name='swinv2_tiny_window8_256', proj_dim=128, spatial_tokens=4):
+    def __init__(self, encoder_name='swinv2_tiny_window8_256', proj_dim=128, spatial_tokens=4, ema_momentum=0.996):
         super().__init__()
-        self.backbone = timm.create_model(
+        self.context_backbone = timm.create_model(
             encoder_name,
             pretrained=False,
             in_chans=1,
             features_only=True,
         )
-        self.channels_list = self.backbone.feature_info.channels()
+        self.target_backbone = copy.deepcopy(self.context_backbone)
+        self.channels_list = self.context_backbone.feature_info.channels()
         self.spatial_tokens = spatial_tokens
-        self.pool = nn.AdaptiveAvgPool2d(spatial_tokens)          # (B, C, S, S)
-        self.proj = MLP(self.channels_list[-1], [512, proj_dim], norm_layer=nn.LayerNorm)
+        self.pool = nn.AdaptiveAvgPool2d(spatial_tokens)          
+        
+        self.context_proj = MLP(self.channels_list[-1], [512, proj_dim], norm_layer=nn.LayerNorm)
+        self.target_proj = copy.deepcopy(self.context_proj)
+        
+        # New spatially-aware predictor
+        self.predictor = JepaPredictor(proj_dim=proj_dim, spatial_tokens_total=spatial_tokens*spatial_tokens)
+        self.ema_momentum = ema_momentum
 
-    def forward(self, x):
-        features = list(self.backbone(x))
+        for p in self.target_backbone.parameters():
+            p.requires_grad = False
+        for p in self.target_proj.parameters():
+            p.requires_grad = False
+
+    def _encode(self, x, backbone, proj):
+        features = list(backbone(x))
         for i in range(len(features)):
-            # Fix channel order for Transformer models (SwinV2 outputs B,H,W,C)
             if features[i].dim() == 4 and features[i].shape[-1] == self.channels_list[i]:
                 features[i] = features[i].permute(0, 3, 1, 2).contiguous()
-        last_map = features[-1]                                   # (B, C, h, w)
-        sp = self.pool(last_map)                                   # (B, C, S, S)
+        last_map = features[-1]
+        sp = self.pool(last_map)
         B, C, S, _ = sp.shape
-        tokens = sp.flatten(2).permute(0, 2, 1)                    # (B, S*S, C)
-        proj_out = self.proj(
-            tokens.reshape(B * S * S, C)
-        ).view(B, S * S, -1)                                       # (B, S*S, proj_dim)
+        tokens = sp.flatten(2).permute(0, 2, 1)
+        proj_out = proj(tokens.reshape(B * S * S, C)).view(B, S * S, -1)
         return features, proj_out
 
+    def forward_context(self, x):
+        return self._encode(x, self.context_backbone, self.context_proj)
+
+    @torch.no_grad()
+    def forward_target(self, x):
+        return self._encode(x, self.target_backbone, self.target_proj)
+
+    @torch.no_grad()
+    def update_target_encoder(self):
+        m = self.ema_momentum
+        for p_t, p_c in zip(self.target_backbone.parameters(), self.context_backbone.parameters()):
+            p_t.data.mul_(m).add_(p_c.data, alpha=1.0 - m)
+        for p_t, p_c in zip(self.target_proj.parameters(), self.context_proj.parameters()):
+            p_t.data.mul_(m).add_(p_c.data, alpha=1.0 - m)
+
+    def forward(self, x):
+        return self.forward_context(x)
+
 class SIGReg(nn.Module):
-    """
-    Sliced Independence Gaussian Regularizer.
-
-    Tests whether the distribution of projected embeddings matches a Gaussian
-    characteristic function via random projections (slicing). Acts as a light
-    distributional regulariser: if embeddings collapse to a single point or a
-    degenerate manifold, SIGReg detects the non-Gaussian distribution and penalises.
-
-    Used alongside the invariance MSE loss:
-      lejepa_loss = labda * sigreg_loss + (1 − labda) * inv_loss
-
-    labda=0.05 keeps SIGReg as a stabiliser — it prevents collapse without
-    dominating the invariance signal that drives feature learning.
-    """
     def __init__(self, knots: int = 17):
         super().__init__()
         t = torch.linspace(0, 3, knots, dtype=torch.float32)
@@ -252,35 +390,16 @@ class SIGReg(nn.Module):
         self.register_buffer("weights", weights * window)
 
     def forward(self, proj: torch.Tensor) -> torch.Tensor:
-        # proj: (V, B, proj_dim) — spatially-averaged projections across views
         A = torch.randn(proj.size(-1), 256, device=proj.device)
-        A = A.div_(A.norm(p=2, dim=0))               # random unit projection directions
-        x_t = (proj @ A).unsqueeze(-1) * self.t      # (V, B, 256, knots)
-        # mean(-3) averages over the batch (dim B) to get empirical char. function
+        A = A.div_(A.norm(p=2, dim=0))               
+        x_t = (proj @ A).unsqueeze(-1) * self.t      
         err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
         statistic = (err @ self.weights) * proj.size(-2)
         return statistic.mean()
 
 class LinearSegProbe(nn.Module):
-    """
-    Last-scale linear probe: single 1×1 conv on the final backbone feature map only.
-
-    WHY last-scale only:
-    Multi-scale probes average predictions from all stages including shallow ones.
-    Shallow features respond to local contrast edges regardless of backbone quality —
-    vessel walls are simply high-contrast, so even a badly-trained backbone produces
-    edge responses in layer1/layer2 that a 1×1 conv can exploit to reconstruct a
-    rough vessel shape. The segmentation then looks deceptively vessel-like while
-    GradCAM shows the backbone actually focuses on borders/catheters.
-
-    By probing ONLY the last feature map, probe F1 measures the same representation
-    that GradCAM targets. If GradCAM shows corner activations, probe F1 will be near 0.
-    If GradCAM shifts to vessels, probe F1 will rise. Both signals stay consistent,
-    making probe F1 in TensorBoard a reliable backbone quality diagnostic.
-    """
     def __init__(self, in_channels_list, num_classes=1):
         super().__init__()
-        # Only the last (semantically richest) feature map
         self.probe = nn.Conv2d(in_channels_list[-1], num_classes, kernel_size=1, bias=True)
 
     def forward(self, features, original_size):
@@ -288,6 +407,9 @@ class LinearSegProbe(nn.Module):
         p = self.probe(last)
         return F.interpolate(p, size=original_size, mode='bilinear', align_corners=False)
 
+# ==========================================
+# 4. Training Loop (with Dynamic Masking)
+# ==========================================
 def train_epoch(model, probe, dataloader, optimiser, scheduler, sigreg, criterion_probe, f1_metric, epoch, augment, config, writer):
     model.train()
     probe.train()
@@ -301,6 +423,13 @@ def train_epoch(model, probe, dataloader, optimiser, scheduler, sigreg, criterio
         is_syntax = is_syntax.cuda().bool()
         original_size = img.shape[2:]
 
+        # Augmentation runs fully on GPU now
+        aug_data = augment(img)
+        global_crops = aug_data['global_crops']
+        local_crops = aug_data['local_crops']
+        local_parent_idx = aug_data['local_parent_idx']
+        local_boxes = aug_data['local_boxes']
+
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             features_original, _ = model(img)
             features_probe = [f.detach() for f in features_original]
@@ -312,30 +441,65 @@ def train_epoch(model, probe, dataloader, optimiser, scheduler, sigreg, criterio
             else:
                 probe_loss = torch.tensor(0.0, device='cuda', requires_grad=True)
 
-            crops = augment(img)                                   # List[5] of (B, C, H, W)
-            global_crops = torch.cat(crops[:2], dim=0)             # (2B, C, H, W)
-            local_crops  = torch.cat(crops[2:], dim=0)             # (3B, C, H, W)
+            # --- TARGET ENCODER (Run first to get ground truth) ---
+            model_ref = model.module if hasattr(model, 'module') else model
+            tgt_proj_local = []
+            for l in local_crops:
+                _, p_t = model_ref.forward_target(l)                
+                tgt_proj_local.append(p_t)
 
-            _, p_proj_global = model(global_crops)                 # (2B, S*S, proj_dim)
-            _, p_proj_local  = model(local_crops)                  # (3B, S*S, proj_dim)
-            p_proj_all = torch.cat([p_proj_global, p_proj_local], dim=0)  # (5B, S*S, proj_dim)
+            # --- CONTEXT ENCODER WITH DYNAMIC PATCH MASKING ---
+            ctx_proj_global = []
+            B = img.size(0)
+            
+            for g_idx, g in enumerate(global_crops):
+                g_masked = g.clone()
+                H, W = g_masked.shape[-2:]
+                
+                # Apply anti-leakage mask
+                for l_idx in range(len(local_crops)):
+                    parent_indices = local_parent_idx[l_idx] 
+                    boxes = local_boxes[l_idx]               
+                    
+                    for b_idx in range(B):
+                        if parent_indices[b_idx] == g_idx:
+                            y_norm, x_norm, h_norm, w_norm = boxes[b_idx]
+                            py, px = int(y_norm * H), int(x_norm * W)
+                            ph, pw = int(h_norm * H), int(w_norm * W)
+                            
+                            # Mask the pixels (0.0 is mean for [-1, 1] normalized images)
+                            g_masked[b_idx, :, py:py+ph, px:px+pw] = 0.0
+                            
+                # Context model sees the masked (holey) image
+                _, p = model(g_masked)                                     
+                ctx_proj_global.append(p)
 
-            V          = len(crops)                                # 5
-            current_bs = img.size(0)
-            S_sq       = p_proj_all.shape[1]                       # S*S spatial tokens
+            # --- PREDICTOR & LOSS CALCULATION ---
+            ctx_stack = torch.stack(ctx_proj_global, dim=0)         
+            batch_idx_ar = torch.arange(B, device=img.device)
 
-            proj_views = p_proj_all.view(V, current_bs, S_sq, -1) # (V, B, S*S, proj_dim)
-            # Stop-gradient on the mean: BYOL/SimSiam style asymmetric invariance loss.
-            # Prevents the feedback loop that causes invariance loss spikes.
-            proj_mean  = proj_views.mean(dim=0).detach()           # (B, S*S, proj_dim)
-            inv_loss   = (proj_mean - proj_views).square().mean()
+            pred_losses = []
+            pooled_views_for_sigreg = []
+            for g in ctx_proj_global:
+                pooled_views_for_sigreg.append(g.mean(dim=1))
 
-            # SIGReg operates on the spatially-averaged projection (avoid non-i.i.d.
-            # statistics from spatial tokens by collapsing S*S first).
-            proj_for_sigreg = proj_views.mean(dim=2)               # (V, B, proj_dim)
+            for li in range(len(local_crops)):
+                parent = local_parent_idx[li]                       
+                boxes = local_boxes[li]                             
+                
+                ctx_tokens = ctx_stack[parent, batch_idx_ar]        
+                pred_local = model_ref.predictor(ctx_tokens, boxes) # Predictor deduces missing patch
+                
+                # Target is the averaged projection of the local crop
+                target_local = tgt_proj_local[li].mean(dim=1).detach()
+                pred_losses.append(F.mse_loss(pred_local, target_local))
+                pooled_views_for_sigreg.append(target_local)
+
+            pred_loss = torch.stack(pred_losses).mean()
+            proj_for_sigreg = torch.stack(pooled_views_for_sigreg, dim=0)  
             sigreg_loss = sigreg(proj_for_sigreg)
 
-            lejepa_loss = sigreg_loss * config['training']['labda'] + inv_loss * (1 - config['training']['labda'])
+            lejepa_loss = sigreg_loss * config['training']['labda'] + pred_loss * (1 - config['training']['labda'])
             total_loss  = lejepa_loss + probe_loss
 
         optimiser.zero_grad()
@@ -346,6 +510,9 @@ def train_epoch(model, probe, dataloader, optimiser, scheduler, sigreg, criterio
         )
         scaler.step(optimiser)
         scaler.update()
+        
+        model_ref = model.module if hasattr(model, 'module') else model
+        model_ref.update_target_encoder()
         scheduler.step()
 
         running_lejepa_loss += lejepa_loss.item()
@@ -362,32 +529,11 @@ def train_epoch(model, probe, dataloader, optimiser, scheduler, sigreg, criterio
         if is_syntax.any():
             writer.add_scalar("Train/Probe_Loss", probe_loss.item(), global_step)
         writer.add_scalar("Train/SIGReg",   sigreg_loss.item(), global_step)
-        writer.add_scalar("Train/Inv_Loss", inv_loss.item(),    global_step)
+        writer.add_scalar("Train/Pred_Loss", pred_loss.item(),    global_step)
 
     return epoch_lejepa_loss / len(dataloader)
 
-
 def _log_saliency(model, imgs, masks, epoch, writer, num_vis=4):
-    """
-    GradCAM on the last backbone feature map — label-free.
-
-    WHY GradCAM instead of input-gradient saliency:
-      Input gradients backprop to the pixel level and pick up high-frequency
-      noise (especially bad with transformer backbones whose patch structure
-      creates a visible grid artefact). GradCAM stays in feature-map space:
-        1. Forward to get last feature map A  (B, C, h, w)
-        2. Scalar target = mean(A)  → backward to get dTarget/dA
-        3. Channel weights α_k = gap(grad_k)
-        4. CAM = ReLU(Σ_k  α_k · A_k)  → upsample to input resolution
-      Result: smooth spatial heatmap showing WHICH REGIONS of the image most
-      activate the backbone, without pixel-level noise.
-
-    Interpretation guide (Val/GradCAM in TensorBoard):
-      GOOD — bright CAM regions overlap the vessel tree in the GT mask column.
-      BAD  — diffuse /uniform CAM, or concentrated on catheter / image border.
-
-    Grid (nrow=3): [input image | GradCAM heatmap | GT vessel mask]
-    """
     model.eval()
     m = model.module if hasattr(model, 'module') else model
     num_vis = min(num_vis, imgs.size(0))
@@ -396,41 +542,33 @@ def _log_saliency(model, imgs, masks, epoch, writer, num_vis=4):
 
     with torch.enable_grad():
         feats, _ = m(imgs_in)
-        last = feats[-1].float()         # (B, C, h, w) — forward already permutes SwinV2
+        last = feats[-1].float()         
         last.retain_grad()
-        last.mean().backward()           # uniform scalar target: gradient shows which
-                                         # channels / locations drive overall activation
+        last.mean().backward()           
 
     with torch.no_grad():
-        grad  = last.grad                                              # (B, C, h, w)
-        alpha = grad.mean(dim=(2, 3), keepdim=True)                    # (B, C, 1, 1)
-        cam   = F.relu((alpha * last).sum(dim=1, keepdim=True))        # (B, 1, h, w)
+        grad  = last.grad                                              
+        alpha = grad.mean(dim=(2, 3), keepdim=True)                    
+        cam   = F.relu((alpha * last).sum(dim=1, keepdim=True))        
         cam   = F.interpolate(cam, size=imgs.shape[2:],
-                              mode='bilinear', align_corners=False)    # (B, 1, H, W)
-        cam   = cam / (cam.amax(dim=(1, 2, 3), keepdim=True) + 1e-8)  # per-sample norm
+                              mode='bilinear', align_corners=False)    
+        cam   = cam / (cam.amax(dim=(1, 2, 3), keepdim=True) + 1e-8)  
 
-    img_vis  = (imgs[:num_vis] * 0.5 + 0.5).float().cpu().clamp(0, 1)  # (N,1,H,W)
-    mask_vis = masks[:num_vis].float().cpu()                              # (N,1,H,W)
-    cam_np   = cam.cpu().numpy()                                          # (N,1,H,W)
+    img_vis  = (imgs[:num_vis] * 0.5 + 0.5).float().cpu().clamp(0, 1)  
+    mask_vis = masks[:num_vis].float().cpu()                              
+    cam_np   = cam.cpu().numpy()                                          
 
     grid_items = []
     for i in range(num_vis):
-        # --- input: replicate 1-ch grey to 3-ch RGB ---
-        inp_rgb = img_vis[i].repeat(3, 1, 1)           # (3,H,W)
-
-        # --- GradCAM: jet colormap blended on top of the image ---
-        jet_np  = cm.jet(cam_np[i, 0])[:, :, :3]       # (H,W,3)  float32 in [0,1]
-        jet_t   = torch.from_numpy(jet_np).float().permute(2, 0, 1)  # (3,H,W)
-        blend   = 0.55 * inp_rgb + 0.45 * jet_t        # semi-transparent overlay
-
-        # --- GT mask: white vessels on black, replicated to 3-ch ---
-        msk_rgb = mask_vis[i].repeat(3, 1, 1)          # (3,H,W)
-
+        inp_rgb = img_vis[i].repeat(3, 1, 1)           
+        jet_np  = cm.jet(cam_np[i, 0])[:, :, :3]       
+        jet_t   = torch.from_numpy(jet_np).float().permute(2, 0, 1)  
+        blend   = 0.55 * inp_rgb + 0.45 * jet_t        
+        msk_rgb = mask_vis[i].repeat(3, 1, 1)          
         grid_items += [inp_rgb, blend, msk_rgb]
 
     grid = torchvision.utils.make_grid(grid_items, nrow=3, padding=2, normalize=False)
     writer.add_image("Val/GradCAM", grid, epoch)
-
 
 def validate_epoch(model, probe, dataloader, f1_metric, epoch, writer):
     model.eval()
@@ -469,7 +607,6 @@ def validate_epoch(model, probe, dataloader, f1_metric, epoch, writer):
         writer.add_scalar("Val/F1", avg_f1, epoch)
         print(f"Validation F1: {avg_f1:.4f}")
 
-    # Saliency needs gradients — must be outside torch.no_grad()
     if first_img is not None:
         _log_saliency(model, first_img, first_mask, epoch, writer)
 
@@ -532,13 +669,8 @@ def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, si
         }
         torch.save(checkpoint, last_model_path)
         
-        backbone_to_save = model.module.backbone if num_gpus > 1 else model.backbone
+        backbone_to_save = model.module.context_backbone if num_gpus > 1 else model.context_backbone
 
-        # Checkpoint selection uses LeJEPA loss, not probe F1.
-        # Probe F1 is 0% throughout (probe never sees labeled data in pretrain mode
-        # and has no nonlinearity to compensate), so it cannot guide backbone selection.
-        # LeJEPA loss measures whether the backbone produces consistent spatial
-        # representations across augmented views — the actual pretraining objective.
         if avg_lejepa_loss < best_lejepa_loss:
             best_lejepa_loss = avg_lejepa_loss
             epochs_no_improve = 0
@@ -549,9 +681,6 @@ def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, si
             epochs_no_improve += 1
             print(f"No improvement for {epochs_no_improve} epochs (lejepa_loss={avg_lejepa_loss:.4f}, best={best_lejepa_loss:.4f}).")
 
-        # Periodic backbone snapshot every 10 epochs, independently of probe F1.
-        # Use these for fine-tuning evaluation — the linear probe F1 is a weak signal;
-        # a snapshot at epoch 50 may have better backbone features than the "best" by F1.
         save_every = config['training'].get('save_every', 10)
         if (epoch + 1) % save_every == 0:
             snap_path = os.path.join(checkpoint_dir, f"backbone_ep{epoch+1}.pth")
@@ -562,27 +691,23 @@ def trainScript(model, probe, train_loader, val_loader, optimiser, scheduler, si
             print(f"Early stopping triggered after {epoch+1} epochs.")
             break
 
-    # Marcăm antrenamentul ca fiind complet la ieșirea din buclă
     with open(done_file_path, "w") as f:
         f.write("Training completed successfully.")
     print(f"\n✅ Antrenament complet pentru {config['model']['encoder_name']}! Fișierul DONE a fost creat.")
 
 if __name__ == "__main__":
-    # Lista cu modelele pe care vrei să le antrenezi succesiv
-    encoders_to_train = ['resnet50', 'swinv2_tiny_window8_256', 'convnextv2_tiny']
+    encoders_to_train = [ 'swinv2_tiny_window8_256']
 
     for encoder in encoders_to_train:
         experiment_name = f"{encoder}_lejepa_SIGREG"
         checkpoint_dir = f"checkpoints/{experiment_name}"
         
-        # 1. Verificăm dacă modelul a fost deja antrenat complet
         if os.path.exists(os.path.join(checkpoint_dir, "DONE")):
             print(f"\n{'='*60}\n⏭️  Modelul {encoder} a fost deja antrenat (Găsit fișier DONE). Trecem la următorul...\n{'='*60}")
             continue
             
         print(f"\n{'='*60}\n🚀 Începe antrenamentul pentru: {encoder}\n{'='*60}")
 
-        # Configurația dinamică pentru modelul curent
         config = {
             'experiment_name': experiment_name,
             'logging': {
@@ -596,39 +721,51 @@ if __name__ == "__main__":
                 'lr_probe': 1e-5,
                 'lr_model': 1e-4,
                 'weight_decay': 5e-2,
-                # labda=0.05: SIGReg is a light distributional regulariser.
-                # Reduced from 0.2 → 0.05: SIGReg should stabilise, not dominate.
-                # High labda caused the invariance loss spikes seen in earlier runs.
+                'num_global_crops': 2,
+                'num_local_crops': 4,
+                'global_scale': (0.8, 1.0),
+                'local_scale': (0.10, 0.35),
+                'global_vessel_threshold': 0.015,
+                'local_vessel_threshold': 0.02,
+                'local_background_threshold': 0.01,
+                'max_global_retries': 12,
+                'max_local_retries': 20,
                 'labda': 0.05,
                 'warmup_epochs': 20,
-                # Backbone snapshots every 10 epochs regardless of probe F1,
-                # because the linear probe F1 is a weak checkpoint criterion.
                 'save_every': 10,
             },
             'model': {
                 'encoder_name': encoder,
-                'proj_dim': 64,
-                # 4×4 = 16 spatial tokens from the last feature map (8×8 → 4×4).
-                # Forces invariance to be learned per spatial region, not globally.
+                'proj_dim': 128,
                 'spatial_tokens': 4,
             }
         }
         
-        # 2. Inițializare Dataloaders și Writer
         writer = SummaryWriter(log_dir=config['logging']['log_dir'])
         configCreate(os.path.join(config['logging']['log_dir'], 'config.yaml'), config)
         
         train_loader = loader(config['training']['img_size'], config['training']['batch_size'], split='train', mode='lejepa')
         val_loader = loader(config['training']['img_size'], config['training']['batch_size'], split='validation', mode='validation')
         
-        # 3. Crearea Modelelor
         model = LeJepaModel(
             encoder_name=config['model']['encoder_name'],
             proj_dim=config['model']['proj_dim'],
             spatial_tokens=config['model']['spatial_tokens'],
         ).cuda()
         sigreg = SIGReg().cuda()
-        augment = augmentariLeJepa(img_size=config['training']['img_size'])
+        
+        augment = augmentariLeJepa(
+            img_size=config['training']['img_size'],
+            num_global_crops=config['training']['num_global_crops'],
+            num_local_crops=config['training']['num_local_crops'],
+            global_scale=tuple(config['training']['global_scale']),
+            local_scale=tuple(config['training']['local_scale']),
+            global_vessel_threshold=config['training']['global_vessel_threshold'],
+            local_vessel_threshold=config['training']['local_vessel_threshold'],
+            local_background_threshold=config['training']['local_background_threshold'],
+            max_global_retries=config['training']['max_global_retries'],
+            max_local_retries=config['training']['max_local_retries'],
+        ).cuda() # Mutăm direct pe CUDA
 
         dummy_input = torch.randn(1, 1, config['training']['img_size'], config['training']['img_size']).cuda()
         with torch.no_grad():
@@ -642,7 +779,6 @@ if __name__ == "__main__":
             model = nn.DataParallel(model)
             probe = nn.DataParallel(probe)
 
-        # 4. Optimizatori și Schedulere
         lr1 = {"params": probe.parameters(), "lr": config['training']['lr_probe'], "weight_decay": config['training']['weight_decay']}
         lr2 = {"params": model.parameters(), "lr": config['training']['lr_model'], "weight_decay": config['training']['weight_decay']}
         opt = torch.optim.AdamW([lr1, lr2])
@@ -655,16 +791,12 @@ if __name__ == "__main__":
         scheduler2 = CosineAnnealingLR(opt, T_max=total_iters - warmup_iters, eta_min=1e-6)
         scheduler = SequentialLR(opt, schedulers=[scheduler1, scheduler2], milestones=[warmup_iters])
         
-        # Vessel pixels are ~3-7% of the image. TverskyLoss(beta=0.7) penalises
-        # false negatives more heavily; pos_weight=10 in BCE compensates for the
-        # background-dominated pixel distribution in the CE gradient.
         _tversky_probe = TverskyLoss(mode='binary', beta=0.7, gamma=0.75, log_loss=False)
         _bce_probe = SoftBCEWithLogitsLoss(pos_weight=torch.tensor([10.0]).cuda())
         def criterion_probe(pred, target):
             return _tversky_probe(pred, target) + _bce_probe(pred, target)
         f1_metric = BinaryF1Score().cuda()
         
-        # 5. Pornire Script
         trainScript(
             model=model,
             probe=probe,
@@ -680,7 +812,6 @@ if __name__ == "__main__":
             writer=writer
         )
         
-        # 6. Clean-up după fiecare model pentru a elibera memoria GPU pentru următorul
         writer.close()
         del model, probe, opt, scheduler, train_loader, val_loader, sigreg
         torch.cuda.empty_cache()
