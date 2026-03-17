@@ -3,7 +3,10 @@ import torchvision
 from torch.utils.data import Dataset
 import json
 import os
+from pathlib import Path
 from PIL import Image
+import numpy as np
+
 
 
 class ArcadeDataset(Dataset):
@@ -24,6 +27,9 @@ class ArcadeDataset(Dataset):
         self.transform = transform
         self.mode = mode.lower() if mode else 'syntax'
         self.root_dir = root_dir
+        self.frangi_dir = frangi_dir
+        self.frangi_preview_dir = frangi_preview_dir
+        self._frangi_failed_paths = set()
 
         with open(json_path, 'r') as f:
             self.data = json.load(f)
