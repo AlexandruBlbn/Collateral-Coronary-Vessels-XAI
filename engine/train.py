@@ -329,8 +329,6 @@ if __name__ == "__main__":
     },
     'model': {
         'model': 'summary',
-        # Set to LeJEPA checkpoint path to load pretrained backbone, e.g.:
-        # 'checkpoints/resnet50_lejepa_strict_probe_v2/best_backbone.pth'
         'pretrained_backbone': None,
     }
     }
