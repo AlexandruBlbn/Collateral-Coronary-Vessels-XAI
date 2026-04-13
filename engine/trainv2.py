@@ -1164,12 +1164,23 @@ def trainScript(
 		ckpt = torch.load(last_model_path, map_location=device)
 		if isinstance(ckpt, dict) and "epoch" in ckpt:
 			model.load_state_dict(ckpt["model_state_dict"])
-			optimiser.load_state_dict(ckpt["optimizer_state_dict"])
-			scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-			best_val_f1 = float(ckpt.get("best_val_f1", -1.0))
-			epochs_no_improve = int(ckpt.get("epochs_no_improve", 0))
-			start_epoch = int(ckpt["epoch"]) + 1
-			print(f"[INFO] Resume complete at epoch {start_epoch} (best val F1: {best_val_f1:.4f})")
+			try:
+				optimiser.load_state_dict(ckpt["optimizer_state_dict"])
+				scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+				best_val_f1 = float(ckpt.get("best_val_f1", -1.0))
+				epochs_no_improve = int(ckpt.get("epochs_no_improve", 0))
+				start_epoch = int(ckpt["epoch"]) + 1
+				print(f"[INFO] Resume complete at epoch {start_epoch} (best val F1: {best_val_f1:.4f})")
+			except Exception as e:
+				# Common when trainable parameter sets change (e.g., different freeze policy).
+				best_val_f1 = -1.0
+				epochs_no_improve = 0
+				start_epoch = 0
+				print(
+					"[WARN] Checkpoint optimizer/scheduler state is incompatible with current run; "
+					"falling back to model-only resume with fresh optimiser/scheduler. "
+					f"Details: {e}"
+				)
 
 	default_threshold = float(config["evaluation"].get("default_threshold", 0.5))
 	vis_every = max(1, int(config["logging"].get("visualize_every_epochs", 2)))

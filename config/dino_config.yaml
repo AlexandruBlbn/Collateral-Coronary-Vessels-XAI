@@ -28,11 +28,7 @@ data:
   global_crop_size: 512
   local_crop_size: 192
 
-  # Frangi-guided vessel-aware crop selection
-  vessel_guided_crops: true
-  global_vessel_threshold: 0.012  # min mean vesselness for a global crop to be accepted
-  local_vessel_threshold: 0.018   # min mean vesselness for a local crop to be accepted
-  max_crop_retries: 12            # number of re-sample attempts before accepting best so far
+  # Random multi-crop selection only; Frangi/vesselness scoring removed for speed
 
 optimizer:
   base_lr: 0.0005                 # scaled lr = base_lr * (effective_batch / 256)
@@ -61,3 +57,4 @@ system:
   gradient_checkpointing: false
   amp: true
   save_every: 25                  # snapshot backbone every N epochs
+  log_every: 20                   # call .item() / write TensorBoard every N batches (avoids GPU sync stalls)

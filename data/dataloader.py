@@ -45,7 +45,9 @@ class ArcadeDataset(Dataset):
         
         if self.mode == 'pretrain':
             # Load all sources: syntax, stenoza, cadica, extra
-            sources_to_load = ['syntax', 'stenoza', 'cadica', 'extra']
+            # 'coronarydominance' is included here after the XA-170K dataset update
+            # (160,320 unlabelled frames; label will be empty string → black mask fallback)
+            sources_to_load = ['syntax', 'stenoza', 'cadica', 'extra', 'coronarydominance']
             for source_name in sources_to_load:
                 if source_name not in split_data:
                     continue

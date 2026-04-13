@@ -1,0 +1,7 @@
+gradio
+numpy
+opencv-python-headless
+Pillow
+timm
+torch
+torchvision
