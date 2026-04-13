@@ -1,0 +1,40 @@
+Clahe + blackhat + whitehat + gauss/sharpness
+boundry loss.
+clDice
+pixel-level OHEM: În timpul calculării loss-ului, sortezi toți pixelii din imagine după eroare și aplici backpropagation doar pe primii 20-30% cei mai grei pixeli. Ignoră complet fundalul negru ușor și forțează rețeaua să se uite doar la capilare.
+Loss Annealing = Bce -> Boundary loss
+
+Sub-pixel convolution
+deep supervision
+Deformable convolutions dcnv3
+Spatial-Channel Attention
+Stochastic Depth (DropPath)
+Multi-Task Signed Distance Map 
+
+I need you to read the code from train.py and train_targeted_vessel_segmentation.py and extract the relevant information about the training process, including the loss functions used, data augmentation techniques, and any specific training strategies implemented.
+The train.py servers as a structure how the code should look. In the first part of the trainv2_requirements.txt, I have listed some techniques and strategies that I want to implement in the training process. Please make sure to include those in the final code structure.
+Based on the requirements listed in trainv2_requirements.txt and the structure of train.py, and the newer methodology tried in train_targeted_vessel_segmentation.py, here is a structured outline of the training process for the vessel segmentation task:
+1. **Data Preparation**:
+   - Load the dataset and apply necessary preprocessing steps.
+   - Implement data augmentation techniques such as random rotations, flips, and intensity variations to increase the diversity of the training data.
+2. **Model Architecture**:
+    - Design a model architecture that incorporates sub-pixel convolution for upsampling, deep supervision for improved gradient flow, and deformable convolutions (dcnv3) for better feature extraction.
+    - Integrate spatial-channel attention mechanisms to enhance the model's focus on relevant features.
+3. **Loss Functions**:
+    - Use a combination of loss functions, including Binary Cross-Entropy (BCE) for pixel-wise classification, boundary loss to focus on the edges of the vessels, and clDice to evaluate the overlap between predicted and ground truth masks.
+    - Implement pixel-level Online Hard Example Mining (OHEM) to focus the training on the most challenging pixels, ignoring easy background pixels.
+4. **Training Strategy**:
+    - Implement a loss annealing strategy where the training starts with BCE loss and gradually incorporates boundary loss as training progresses.
+    - Use stochastic depth (DropPath) to improve generalization and prevent overfitting by randomly dropping layers during training.
+    - Incorporate multi-task learning by predicting signed distance maps alongside the segmentation masks to provide additional supervision and improve the model's understanding of vessel structures.
+5. **Optimization**:
+    - Use an appropriate optimizer (e.g., Adam or SGD) with a learning rate scheduler to adjust the learning rate during training for better convergence.
+    - Monitor training and validation metrics to ensure the model is learning effectively and to prevent overfitting.
+6. **Evaluation**:
+    - Evaluate the model on a separate validation set using metrics such as Dice coefficient, Intersection over Union (IoU), and clDice to assess the performance of the vessel segmentation also f1 for the vessels.
+    - Perform qualitative analysis by visualizing the predicted segmentation masks against the ground truth to identify areas of improvement.
+7. **Saving and Loading Models**:
+    - Implement functionality to save the best-performing model based on validation metrics and load it for inference or further training.
+This structured outline provides a comprehensive approach to training a vessel segmentation model, incorporating advanced techniques and strategies to enhance performance and generalization. The implementation of these techniques will be crucial in achieving accurate and robust vessel segmentation results.
+Logging and visualization tools should also be integrated to track the training process and visualize the results effectively.  It will be used tensorboard. Additionally, consider implementing early stopping based on validation performance to prevent overfitting and ensure the best model is saved.
+try to follow train.py structure for the logging.

@@ -1,61 +1,63 @@
-<<<<<<< HEAD
-experiment_name: "dino_pretrain_swinv2_tiny_window16_256"
+experiment_name: "dinov3_pretrain_efficientnetv2_s"
 
 model:
-  backbone: "swinv2_tiny_window16_256"
-  teacher_backbone_path: "checkpoints/mim/simmim_pretrain_swinv2_tiny_window16_256/best_backbone.pth"
-=======
-experiment_name: "dino_pretrain_convnext_tiny"
+  backbone: "efficientnetv2_s"
+  teacher_backbone_path: null     # null = random init (no MIM warm-start)
+  input_size: 512
 
-model:
-  backbone: "convnext_tiny"
-  teacher_backbone_path: "checkpoints/mim/simmim_pretrain_convnext_tiny/best_backbone.pth"
->>>>>>> 2d5c4c9 (feat: Update DINO configuration and add new training script)
-  input_size: 256
-  feature_dim: 768
-  
-  head_dim: 4096
-  head_hidden_dim: 2024
+  # DINOv3 projection head
+  head_out_dim: 65536
+  head_hidden_dim: 2048
   head_bottleneck_dim: 256
+  use_bn_in_head: false
 
 data:
-  batch_size: 16
-  desired_batch_size: 64
-  num_workers: 4
-  in_channels: 1
+  json_path: "data/ARCADE/processed/dataset.json"
+  root_dir: "."
+  batch_size: 8                   # effective 32 via grad accum (32 GB VRAM, 512px global, 4ch)
+  desired_batch_size: 32
+  num_workers: 6
+  in_channels: 4                  # CLAHE | white-hat | black-hat | sharpness (trainv4 recipe)
+
   n_global_crops: 2
-  n_local_crops: 6
+  n_local_crops: 8
   global_scale_min: 0.4
-  global_scale_max: 0.9
-  local_scale_min: 0.2
+  global_scale_max: 1.0
+  local_scale_min: 0.05
   local_scale_max: 0.4
+  global_crop_size: 512
+  local_crop_size: 192
+
+  # Frangi-guided vessel-aware crop selection
+  vessel_guided_crops: true
+  global_vessel_threshold: 0.012  # min mean vesselness for a global crop to be accepted
+  local_vessel_threshold: 0.018   # min mean vesselness for a local crop to be accepted
+  max_crop_retries: 12            # number of re-sample attempts before accepting best so far
 
 optimizer:
-  lr: 1e-4
-  final_lr: 1e-6
+  base_lr: 0.0005                 # scaled lr = base_lr * (effective_batch / 256)
+  final_lr: 1.0e-6
   weight_decay: 0.04
-  weight_decay_end: 0.2
-  warmup_epochs: 0
+  weight_decay_end: 0.4
+  warmup_epochs: 10
   epochs: 300
-  patience: 50
+  clip_grad: 3.0
 
 dino:
   student_temp: 0.1
   teacher_temp: 0.04
   teacher_warmup_temp: 0.01
-  teacher_temp_warmup_epochs: 10
-  ema_momentum: 0.996
-  center_momentum: 0.99
-  koleo_weight: 0
-  clip_grad: 3.0
-
-  # --- GRAM ANCHORING SETTINGS ---
-  gram_start_epoch: 100      # Pornim Gram abia după ce modelul se stabilizează (Epoch 50)
-  lambda_gram: 0.2         # Ponderea loss-ului
-  gram_momentum: 0.99       # Momentum pentru ancora (istoricul Gram)
+  teacher_temp_warmup_epochs: 30
+  ema_momentum_base: 0.996
+  ema_momentum_final: 1.0
+  center_momentum: 0.9
+  koleo_weight: 0.1               # KoLeo entropy regulariser weight
+  freeze_last_layer_epochs: 1     # freeze prototypes at start to avoid collapse
 
 system:
   device: "cuda"
   seed: 42
-  save_dir: "./checkpoints/dino/"
-  gradient_checkpointing: true
+  save_dir: "checkpoints/dinov3"
+  gradient_checkpointing: false
+  amp: true
+  save_every: 25                  # snapshot backbone every N epochs
