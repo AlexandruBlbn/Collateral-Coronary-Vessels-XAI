@@ -1,0 +1,10 @@
+XA-SSL-REPO/segmodel/train_unext.py:71:            loss = criterion(output, mask)
+XA-SSL-REPO/models_vmae.py:66:        self.norm_pix_loss = norm_pix_loss
+XA-SSL-REPO/models_vmae.py:267:            loss = (pred - target) ** 2  # (N, L, p*p*3)
+XA-SSL-REPO/models_vmae.py:268:            loss = loss.mean(dim=-1)    # (N, L)
+XA-SSL-REPO/models_vmae.py:270:            loss = (pred - target) ** 2  # (N, L, p*p*3)
+XA-SSL-REPO/models_vmae.py:271:            loss = loss.mean(dim=-1)    # (N, L)
+XA-SSL-REPO/models_vmae.py:273:        loss = loss * patch_weight
+XA-SSL-REPO/models_vmae.py:274:        loss = (loss * mask).sum() / mask.sum()
+XA-SSL-REPO/models_vmae.py:303:        cycle_loss = F.binary_cross_entropy_with_logits(pred_seg, imgs_probs.detach())
+XA-SSL-REPO/models_vmae.py:305:        loss = rec_loss + cycle_loss

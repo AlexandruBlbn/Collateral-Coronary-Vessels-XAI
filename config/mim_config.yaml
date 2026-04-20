@@ -1,23 +1,56 @@
-experiment_name: "simmim_pretrain_vit_small_patch16_224"
+experiment_name: "simmim_pretrain_swinv2_tiny_window16_256"
 
 model:
-  backbone: "vit_small_patch16_224"
+  backbone: "swinv2_tiny_window16_256"
   input_size: 256
+  in_channels: 1
+  decoder_type: "progressive"
+  decoder_hidden_dim: 512
+  output_activation: "sigmoid"
 
 data:
-  batch_size: 32
-  num_workers: 4
-  mask_patch_size: 4 
-  mask_ratio: 0.65    
-  in_channels: 1    
- 
+  dataset_style: "xa170k"
+  data_path: "XA-170K/dataset"
+  sources:
+    - coronarydominance
+    - xcad
+    - syntax
+  require_all_sources: true
+  max_samples: 15000
+  subset_seed: 42
+  batch_size: 64
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  drop_last: true
+  mask_block_size: 8
+  mask_ratio: 0.65
+  effective_mask_blocks: null
+
+loss:
+  pixel_weight: 1.0
+  gradient_weight: 0.25
+  vessel_focus_weight: 1.5
+  vessel_prior_kernel_size: 9
 
 optimizer:
-  lr: 1e-4            
+  lr: 1.5e-4
   weight_decay: 0.05
-  epochs: 300           
+  epochs: 100
+  warmup_epochs: 20
+
+training:
+  accum_steps: 1
+  grad_clip: 1.0
+  log_every: 20
+  reconstruction_log_every: 50
+  reconstruction_max_images: 4
+  save_every: 10
 
 system:
   device: "cuda"
   seed: 42
+  precision: "bfloat16"
   save_dir: "./checkpoints/mim/"
+  resume: ""

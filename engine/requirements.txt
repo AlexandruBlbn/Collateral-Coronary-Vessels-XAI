@@ -6,10 +6,15 @@ matplotlib
 tqdm
 tensorboard
 opencv-python-headless
-timm
+timm==1.0.20
 torchinfo
 seaborn
 pandas
 gradio
-
-pip install torch torchvision pyyaml numpy matplotlib tqdm tensorboard opencv-python-headless timm torchinfo seaborn pandas gradio nibabel gdown albumentations scikit-learn scikit-image  segmentation_models_pytorch torchmetrics 
+nibabel
+gdown
+albumentations
+scikit-learn
+scikit-image
+segmentation_models_pytorch
+torchmetrics
