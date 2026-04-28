@@ -44,3 +44,5 @@ roo
 .roo
 skills
 setup_git_and_requirements.sh
+.github
+.gitignore
