@@ -18,8 +18,5 @@ scikit-learn
 scikit-image
 segmentation_models_pytorch
 torchmetrics
-
-pip install torch torchvision pyyaml numpy matplotlib tqdm tensorboard \
-    opencv-python-headless timm==1.0.20 torchinfo seaborn pandas gradio \
-    nibabel gdown albumentations scikit-learn scikit-image \
-    segmentation_models_pytorch torchmetrics
+monai
+einops

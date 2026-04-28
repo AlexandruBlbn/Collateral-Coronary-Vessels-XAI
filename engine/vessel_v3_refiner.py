@@ -16,6 +16,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.tensorboard import SummaryWriter
+import torchvision
 
 try:
     import timm
@@ -47,6 +48,54 @@ def _signed_distance_map(mask01: np.ndarray) -> np.ndarray:
     if max_abs > 0: sdm /= max_abs
     return sdm.astype(np.float32)
 
+def _disconnect_tensor(mask_tensor: torch.Tensor) -> torch.Tensor:
+    """Adds random breaks to the tensor mask to simulate disconnected vessels."""
+    B, C, H, W = mask_tensor.shape
+    device = mask_tensor.device
+    mask = mask_tensor.clone()
+    for b in range(B):
+        num_breaks = random.randint(4, 10)
+        indices = torch.nonzero(mask[b, 0] > 0.5)
+        if len(indices) > 0:
+            for _ in range(num_breaks):
+                idx = random.randint(0, len(indices) - 1)
+                y, x = indices[idx]
+                r = random.randint(3, 8)
+                # Create coordinate grids
+                Y, X = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
+                dist_sq = (Y - y)**2 + (X - x)**2
+                mask[b, 0][dist_sq <= r**2] = 0
+    return mask
+
+def _tp_fp_fn(preds: torch.Tensor, masks: torch.Tensor):
+    p = preds.int()
+    m = masks.int()
+    tp = torch.logical_and(p == 1, m == 1).sum().item()
+    fp = torch.logical_and(p == 1, m == 0).sum().item()
+    fn = torch.logical_and(p == 0, m == 1).sum().item()
+    return float(tp), float(fp), float(fn)
+
+def _f1_iou_dice_from_counts(tp: float, fp: float, fn: float):
+    f1 = (2.0 * tp) / max(1e-8, (2.0 * tp + fp + fn))
+    iou = tp / max(1e-8, (tp + fp + fn))
+    dice = (2.0 * tp) / max(1e-8, (2.0 * tp + fp + fn))
+    return float(f1), float(iou), float(dice)
+
+def _log_prediction_grid(tb_writer: SummaryWriter, tag: str, step: int, images, masks, probs, threshold: float = 0.5):
+    num_samples = min(4, images.size(0))
+    grid_images = []
+    preds = (probs > threshold).float()
+
+    for i in range(num_samples):
+        # We take the first channel of the original image (CLAHE) for visualization
+        img_vis = images[i, 0:1].detach().cpu().repeat(3, 1, 1)
+        pred_vis = preds[i, 0:1].detach().cpu().repeat(3, 1, 1)
+        mask_vis = masks[i, 0:1].detach().cpu().repeat(3, 1, 1)
+        grid_images.extend([img_vis, pred_vis, mask_vis])
+
+    grid = torchvision.utils.make_grid(grid_images, nrow=3, padding=2)
+    tb_writer.add_image(tag, grid, step)
+
 # --- DATASET ---
 class VesselDatasetV3(Dataset):
     def __init__(
@@ -56,12 +105,10 @@ class VesselDatasetV3(Dataset):
         img_size: int = 512,
         mode: str = "train",
         root_dir: str = ".",
-        refiner_mode: bool = False,
     ):
         self.img_size = img_size
         self.mode = mode
         self.root_dir = Path(root_dir)
-        self.refiner_mode = refiner_mode
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 
@@ -70,24 +117,16 @@ class VesselDatasetV3(Dataset):
         
         split_data = data.get(split, data.get("validation" if split=="val" else split, {}))
         
-        # Collect and pair labels across all sources (syntax, stenoza, extra, cadica, etc.)
-        path_to_labels = {} 
-        for src_name, src_data in split_data.items():
-            if not isinstance(src_data, dict): continue
-            for s_id, s_info in src_data.items():
+        # We ONLY want the syntax dataset for now (main model training for vessels)
+        self.samples = []
+        if "syntax" in split_data and isinstance(split_data["syntax"], dict):
+            for s_id, s_info in split_data["syntax"].items():
                 img_path = s_info.get("data")
-                if not img_path: continue
-                if img_path not in path_to_labels:
-                    path_to_labels[img_path] = {"v": None, "s": None}
-                lbl = s_info.get("label")
-                if src_name == "stenoza":
-                    path_to_labels[img_path]["s"] = lbl
-                else:
-                    if path_to_labels[img_path]["v"] is None or src_name == "syntax":
-                        path_to_labels[img_path]["v"] = lbl
-        
-        self.samples = [{"img": p, "v_lbl": l["v"], "s_lbl": l["s"]} for p, l in path_to_labels.items()]
-        print(f"[INFO] Dataset ({split}): {len(self.samples)} unique samples.")
+                lbl_path = s_info.get("label")
+                if img_path and lbl_path and isinstance(img_path, str) and isinstance(lbl_path, str):
+                    self.samples.append({"img": img_path, "lbl": lbl_path})
+                    
+        print(f"[INFO] Dataset ({split}): {len(self.samples)} syntax samples loaded.")
 
     def _inject_artifacts(self, img: np.ndarray):
         if self.mode == "train":
@@ -101,39 +140,25 @@ class VesselDatasetV3(Dataset):
                 cv2.circle(img, (cx, cy), random.randint(15, 60), random.randint(30, 100), -1)
         return img
 
-    def _disconnect_vessels(self, mask: np.ndarray) -> np.ndarray:
-        distorted = mask.copy()
-        if self.mode == "train" and np.sum(distorted) > 0:
-            num_breaks = random.randint(2, 6)
-            coords = np.argwhere(distorted[..., 0] > 0)
-            if len(coords) > 0:
-                for _ in range(num_breaks):
-                    idx = random.randint(0, len(coords) - 1)
-                    y, x = coords[idx]
-                    radius = random.randint(2, 5)
-                    cv2.circle(distorted[..., 0], (x, y), radius, 0, -1)
-        return distorted
-
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         s = self.samples[idx]
         img = cv2.imread(str(self.root_dir / s["img"]), cv2.IMREAD_GRAYSCALE)
-        img = cv2.resize(img, (self.img_size, self.img_size))
+        img = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
         
         if self.mode == "train":
             img = self._inject_artifacts(img)
-            if random.random() > 0.65: img = cv2.GaussianBlur(img, (5, 5), random.uniform(0.5, 1.5))
-            if random.random() > 0.5: img = np.clip(random.uniform(0.8, 1.2) * img + random.randint(-10, 10), 0, 255).astype(np.uint8)
+            if random.random() > 0.65: 
+                sigma = random.uniform(0.5, 1.5)
+                img = cv2.GaussianBlur(img, (5, 5), sigma)
+            if random.random() > 0.5: 
+                img = np.clip(random.uniform(0.8, 1.2) * img + random.randint(-10, 10), 0, 255).astype(np.uint8)
 
-        # Labels
-        v_mask = cv2.imread(str(self.root_dir / s["v_lbl"]), 0) if s["v_lbl"] else np.zeros_like(img)
-        s_mask = cv2.imread(str(self.root_dir / s["s_lbl"]), 0) if s["s_lbl"] else np.zeros_like(img)
-        v_mask = (cv2.resize(v_mask, (self.img_size, self.img_size), interpolation=0) > 127).astype(np.uint8)
-        s_mask = (cv2.resize(s_mask, (self.img_size, self.img_size), interpolation=0) > 127).astype(np.uint8)
-        
-        mask_2ch = np.stack([v_mask, s_mask], axis=-1)
+        # 1-Channel Vessel Mask
+        mask = cv2.imread(str(self.root_dir / s["lbl"]), 0) if s["lbl"] else np.zeros_like(img)
+        mask = (cv2.resize(mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST) > 127).astype(np.uint8)
 
         # 4-Channel Prep
         c1 = self.clahe.apply(img)
@@ -141,13 +166,10 @@ class VesselDatasetV3(Dataset):
         c3 = cv2.morphologyEx(img, cv2.MORPH_BLACKHAT, self.morph_kernel)
         c4 = cv2.addWeighted(img, 4.0, cv2.GaussianBlur(img, (0, 0), 10), -4.0, 128)
         channels = [c1, c2, c3, c4]
-        
-        if self.refiner_mode:
-            channels.append(self._disconnect_vessels(mask_2ch)[..., 0] * 255)
 
         img_t = torch.from_numpy(np.stack(channels, -1).astype(np.float32) / 255.0).permute(2, 0, 1)
-        mask_t = torch.from_numpy(mask_2ch).permute(2, 0, 1).float()
-        sdm_t = torch.from_numpy(np.stack([_signed_distance_map(v_mask), _signed_distance_map(s_mask)], 0)).float()
+        mask_t = torch.from_numpy(mask).unsqueeze(0).float()
+        sdm_t = torch.from_numpy(_signed_distance_map(mask)).unsqueeze(0).float()
 
         return img_t, mask_t, sdm_t, s["img"]
 
@@ -163,7 +185,7 @@ class AttentionGate(nn.Module):
     def forward(self, g, x):
         g1 = self.W_g(g)
         x1 = self.W_x(x)
-        if g1.shape[2:] != x1.shape[2:]: g1 = F.interpolate(g1, size=x1.shape[2:], mode="bilinear")
+        if g1.shape[2:] != x1.shape[2:]: g1 = F.interpolate(g1, size=x1.shape[2:], mode="bilinear", align_corners=False)
         return x * self.psi(self.act(g1 + x1))
 
 class DCNBlock(nn.Module):
@@ -192,13 +214,28 @@ class SubPixelUp(nn.Module):
 
     def forward(self, x, skip):
         x = self.up(x)
-        if x.shape[2:] != skip.shape[2:]: x = F.interpolate(x, size=skip.shape[2:], mode="bilinear")
+        if x.shape[2:] != skip.shape[2:]: x = F.interpolate(x, size=skip.shape[2:], mode="bilinear", align_corners=False)
         return self.fuse(torch.cat([x, self.att(x, skip)], 1))
 
 class VesselNetV3(nn.Module):
-    def __init__(self, in_chans=4, num_classes=2, encoder_name="efficientnetv2_s"):
+    def __init__(self, in_chans=4, num_classes=1, encoder_name="efficientnetv2_s", pretrained=True):
         super().__init__()
-        self.encoder = timm.create_model(encoder_name, features_only=True, in_chans=in_chans, pretrained=True)
+        if timm is None:
+            raise ImportError("timm is required for VesselNetV3 but is not installed.")
+
+        try:
+            self.encoder = timm.create_model(
+                encoder_name,
+                features_only=True,
+                in_chans=in_chans,
+                pretrained=pretrained,
+            )
+        except RuntimeError as e:
+            if pretrained and "No pretrained weights exist" in str(e):
+                print(f"[WARN] {e} Falling back to pretrained=False for {encoder_name}.")
+                self.encoder = timm.create_model(encoder_name, features_only=True, in_chans=in_chans, pretrained=False)
+            else:
+                raise
         ch = self.encoder.feature_info.channels()
         self.up4 = SubPixelUp(ch[4], ch[3], ch[3])
         self.up3 = SubPixelUp(ch[3], ch[2], ch[2])
@@ -207,7 +244,7 @@ class VesselNetV3(nn.Module):
         self.up0 = nn.Sequential(nn.Conv2d(ch[0], ch[0]*4, 3, padding=1), nn.PixelShuffle(2), nn.BatchNorm2d(ch[0]), nn.GELU(),
                                  nn.Conv2d(ch[0], 32, 3, padding=1), nn.BatchNorm2d(32), nn.GELU())
         self.seg_head = nn.Conv2d(32, num_classes, 1)
-        self.sdm_head = nn.Conv2d(32, num_classes, 1)
+        self.sdm_head = nn.Conv2d(32, 1, 1)
 
     def forward(self, x):
         h, w = x.shape[2:]
@@ -216,8 +253,8 @@ class VesselNetV3(nn.Module):
         d = self.up0(d)
         seg, sdm = self.seg_head(d), self.sdm_head(d)
         if seg.shape[2:] != (h, w):
-            seg = F.interpolate(seg, (h, w), mode="bilinear")
-            sdm = F.interpolate(sdm, (h, w), mode="bilinear")
+            seg = F.interpolate(seg, (h, w), mode="bilinear", align_corners=False)
+            sdm = F.interpolate(sdm, (h, w), mode="bilinear", align_corners=False)
         return {"seg": seg, "sdm": sdm}
 
 # --- LOSS & TRAIN ---
@@ -250,28 +287,105 @@ class HybridLoss(nn.Module):
     def forward(self, pred, target, sdm_target):
         return self.bce(pred["seg"], target) + 0.2 * self.soft_cldice(torch.sigmoid(pred["seg"]), target) + 0.1 * self.l1(torch.tanh(pred["sdm"]), sdm_target)
 
-def train_epoch(model, loader, opt, crit, dev):
+def train_epoch(model, loader, opt, crit, dev, epoch, writer, tag, base_model=None):
     model.train()
+    if base_model: base_model.eval()
+    
     l_sum = 0
-    for img, m, sdm, _ in tqdm(loader, desc="Train"):
+    total_tp, total_fp, total_fn = 0.0, 0.0, 0.0
+    
+    pbar = tqdm(loader, desc=f"Train {tag}")
+    
+    last_batch = None
+    last_preds = None
+    
+    for img, m, sdm, _ in pbar:
         img, m, sdm = img.to(dev), m.to(dev), sdm.to(dev)
+        
+        if base_model:
+            with torch.no_grad():
+                base_out = base_model(img)
+                base_mask = torch.sigmoid(base_out["seg"])
+                base_mask = _disconnect_tensor(base_mask)
+                img = torch.cat([img, base_mask], dim=1)
+                
         opt.zero_grad()
-        loss = crit(model(img), m, sdm)
+        out = model(img)
+        loss = crit(out, m, sdm)
         loss.backward()
         opt.step()
         l_sum += loss.item()
-    return l_sum / len(loader)
+        
+        # Metrics calculation
+        preds_prob = torch.sigmoid(out["seg"])
+        preds_bin = (preds_prob > 0.5).float()
+        
+        tp, fp, fn = _tp_fp_fn(preds_bin, m)
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+        
+        f1, _, _ = _f1_iou_dice_from_counts(tp, fp, fn)
+        pbar.set_postfix({"loss": loss.item(), "batch_f1": f1})
+        
+        last_batch = (img, m)
+        last_preds = preds_prob
+        
+    f1_epoch, iou_epoch, dice_epoch = _f1_iou_dice_from_counts(total_tp, total_fp, total_fn)
+    
+    if writer and last_batch is not None:
+        _log_prediction_grid(writer, f"{tag}/Train_Preds", epoch, last_batch[0], last_batch[1], last_preds)
+        writer.add_scalar(f"Loss/{tag}_Train", l_sum / len(loader), epoch)
+        writer.add_scalar(f"F1/{tag}_Train", f1_epoch, epoch)
+        
+    return l_sum / len(loader), f1_epoch
 
-def val_epoch(model, loader, crit, dev):
+def val_epoch(model, loader, crit, dev, epoch, writer, tag, base_model=None):
     model.eval()
+    if base_model: base_model.eval()
+    
     l_sum = 0
-    with torch.no_grad():
-        for img, m, sdm, _ in tqdm(loader, desc="Val"):
-            img, m, sdm = img.to(dev), m.to(dev), sdm.to(dev)
-            l_sum += crit(model(img), m, sdm).item()
-    return l_sum / len(loader)
+    total_tp, total_fp, total_fn = 0.0, 0.0, 0.0
+    
+    last_batch = None
+    last_preds = None
 
-def load_vessel_model(ckpt, in_c=4, nc=2, dev="cpu"):
+    with torch.no_grad():
+        pbar = tqdm(loader, desc=f"Val {tag}")
+        for img, m, sdm, _ in pbar:
+            img, m, sdm = img.to(dev), m.to(dev), sdm.to(dev)
+            if base_model:
+                base_out = base_model(img)
+                base_mask = torch.sigmoid(base_out["seg"])
+                base_mask = _disconnect_tensor(base_mask) 
+                img = torch.cat([img, base_mask], dim=1)
+                
+            out = model(img)
+            loss = crit(out, m, sdm)
+            l_sum += loss.item()
+            
+            # Metrics calculation
+            preds_prob = torch.sigmoid(out["seg"])
+            preds_bin = (preds_prob > 0.5).float()
+            
+            tp, fp, fn = _tp_fp_fn(preds_bin, m)
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
+            
+            last_batch = (img, m)
+            last_preds = preds_prob
+            
+    f1_epoch, iou_epoch, dice_epoch = _f1_iou_dice_from_counts(total_tp, total_fp, total_fn)
+    
+    if writer and last_batch is not None:
+        _log_prediction_grid(writer, f"{tag}/Val_Preds", epoch, last_batch[0], last_batch[1], last_preds)
+        writer.add_scalar(f"Loss/{tag}_Val", l_sum / len(loader), epoch)
+        writer.add_scalar(f"F1/{tag}_Val", f1_epoch, epoch)
+        
+    return l_sum / len(loader), f1_epoch
+
+def load_vessel_model(ckpt, in_c=4, nc=1, dev="cpu"):
     m = VesselNetV3(in_chans=in_c, num_classes=nc).to(dev)
     if os.path.isfile(ckpt):
         d = torch.load(ckpt, map_location=dev)
@@ -279,41 +393,51 @@ def load_vessel_model(ckpt, in_c=4, nc=2, dev="cpu"):
         print(f"[INFO] Loaded: {ckpt}")
     return m.eval()
 
-@torch.no_grad()
-def inference(path, b_mod, r_mod, dev, sz=512):
-    img = cv2.resize(cv2.imread(str(path), 0), (sz, sz))
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    c1, c2, c3 = clahe.apply(img), cv2.morphologyEx(img, 1, cv2.getStructuringElement(2, (15,15))), cv2.morphologyEx(img, 2, cv2.getStructuringElement(2, (15,15)))
-    c4 = cv2.addWeighted(img, 4.0, cv2.GaussianBlur(img, (0,0), 10), -4.0, 128)
-    
-    in4 = torch.from_numpy(np.stack([c1,c2,c3,c4], -1).astype(np.float32)/255.).permute(2,0,1).unsqueeze(0).to(dev)
-    b_p = torch.sigmoid(b_mod(in4)["seg"]).squeeze().cpu().numpy()
-    
-    in5 = torch.from_numpy(np.stack([c1,c2,c3,c4,((b_p[0]>0.5)*255).astype(np.uint8)], -1).astype(np.float32)/255.).permute(2,0,1).unsqueeze(0).to(dev)
-    r_p = torch.sigmoid(r_mod(in5)["seg"]).squeeze().cpu().numpy()
-    return b_p, r_p
-
 if __name__ == "__main__":
-    TASK, EP, BS, LR, DEV = "train_base", 50, 8, 2e-4, "cuda" if torch.cuda.is_available() else "cpu"
+    # TASK choices: "train_base", "train_refiner"
+    # Step 1: Set TASK = "train_base" (Trains the 4-channel model on SYNTAX)
+    # Step 2: Set TASK = "train_refiner" (Trains the 5-channel model to reconnect vessels)
+    TASK = "train_base" 
+    
+    EP, BS, LR, DEV = 100, 8, 2e-4, "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(42)
     
     if TASK.startswith("train"):
         IS_R = (TASK == "train_refiner")
-        ds_t = VesselDatasetV3("data/ARCADE/processed/dataset.json", "train", refiner_mode=IS_R)
-        ds_v = VesselDatasetV3("data/ARCADE/processed/dataset.json", "val", refiner_mode=IS_R)
-        ld_t, ld_v = DataLoader(ds_t, BS, True, num_workers=4), DataLoader(ds_v, BS, False, num_workers=4)
         
-        model = VesselNetV3(in_chans=5 if IS_R else 4, num_classes=2).to(DEV)
+        # We increase num_workers and enable pin_memory to speed up the data loading
+        ds_t = VesselDatasetV3("data/ARCADE/processed/dataset.json", split="train", mode="train")
+        ds_v = VesselDatasetV3("data/ARCADE/processed/dataset.json", split="val", mode="val")
+        ds_test = VesselDatasetV3("data/ARCADE/processed/dataset.json", split="test", mode="val")
+        
+        ld_t = DataLoader(ds_t, BS, shuffle=True, num_workers=8, pin_memory=True)
+        ld_v = DataLoader(ds_v, BS, shuffle=False, num_workers=8, pin_memory=True)
+        ld_test = DataLoader(ds_test, BS, shuffle=False, num_workers=8, pin_memory=True)
+        
+        base_model = None
+        if IS_R:
+            print("[INFO] Loading Main Model for Refiner training...")
+            base_model = load_vessel_model("checkpoints/v3_base.pth", in_c=4, nc=1, dev=DEV)
+            
+        model = VesselNetV3(in_chans=5 if IS_R else 4, num_classes=1).to(DEV)
         opt = optim.AdamW(model.parameters(), lr=LR)
-        crit, sch = HybridLoss(), CosineAnnealingLR(opt, T_max=EP)
+        crit = HybridLoss()
+        sch = CosineAnnealingLR(opt, T_max=EP)
         writer = SummaryWriter(f"runs/v3_{TASK}")
 
         for e in range(EP):
-            tl, vl = train_epoch(model, ld_t, opt, crit, DEV), val_epoch(model, ld_v, crit, DEV)
+            tl, t_f1 = train_epoch(model, ld_t, opt, crit, DEV, e, writer, tag=TASK, base_model=base_model)
+            vl, v_f1 = val_epoch(model, ld_v, crit, DEV, e, writer, tag=TASK, base_model=base_model)
             sch.step()
-            writer.add_scalar("Loss/train", tl, e); writer.add_scalar("Loss/val", vl, e)
-            print(f"Ep {e+1}/{EP} | Train: {tl:.4f} | Val: {vl:.4f}")
-            if (e+1)%10==0:
+            print(f"Ep {e+1}/{EP} | Train Loss: {tl:.4f} F1: {t_f1:.4f} | Val Loss: {vl:.4f} F1: {v_f1:.4f}")
+            if (e+1) % 10 == 0:
                 os.makedirs("checkpoints", exist_ok=True)
                 torch.save(model.state_dict(), f"checkpoints/v3_{'refiner' if IS_R else 'base'}.pth")
+        
+        # Test Phase
+        print(f"\n[INFO] Starting Test Phase for {TASK}...")
+        model.load_state_dict(torch.load(f"checkpoints/v3_{'refiner' if IS_R else 'base'}.pth", map_location=DEV))
+        test_l, test_f1 = val_epoch(model, ld_test, crit, DEV, EP, writer, tag=f"{TASK}_Test", base_model=base_model)
+        print(f"[INFO] Test Complete | Loss: {test_l:.4f} | F1: {test_f1:.4f}")
+        
         writer.close()
