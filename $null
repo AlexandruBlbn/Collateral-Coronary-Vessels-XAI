@@ -1,0 +1,4 @@
+
+[notice] A new release of pip is available: 25.3 -> 26.0.1
+[notice] To update, run: python.exe -m pip install --upgrade pip
+ERROR: Could not open requirements file: [Errno 22] Invalid argument: "import arxiv; client = arxiv.Client(); search = arxiv.Search(query='V-JEPA 2.1 dense features self-supervised', max_results=10); results = list(client.results(search)); [print(f'TITLE: {r.title}\\nID: {r.entry_id}\\nYEAR: {r.published}\\nURL: {r.pdf_url}\\n---') for r in results]"
