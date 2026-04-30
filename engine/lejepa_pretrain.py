@@ -43,7 +43,7 @@ except ImportError:
     FrangiCache = None
     precompute_all = None
     _HAS_FRANGI_CACHE = False
-from zoo.jepa_models import DenseLeJepaModel  # noqa: E402
+from zoo.jepa_models import DenseLeJepaModel, compute_distance_weights  # noqa: E402
 from zoo.sigreg import SIGRegLoss  # noqa: E402
 from utils.helpers import set_seed  # noqa: E402
 
@@ -453,49 +453,80 @@ def train(config_path: str) -> None:
                 else nullcontext()
             )
             with amp_ctx:
-                # -- Encode global crops (context) ---------------------
-                ctx_tokens, ctx_spatial, ctx_feat = model.encode(g_flat)
-                D = ctx_tokens.shape[-1]
-                L_ctx = ctx_tokens.shape[1]
-                ctx_tokens = ctx_tokens.reshape(B, ng, L_ctx, D)
+                # ── Encode global crops (context) ──
+                # model.encode() returns list of [B*ng, N, proj_dim] per level
+                ctx_tokens_list, _, _ = model.encode(g_flat)
+                num_levels = len(ctx_tokens_list)
+                D = ctx_tokens_list[0].shape[-1]
+                L_ctx = ctx_tokens_list[0].shape[1]
 
-                # -- Encode local crops (target) -----------------------
-                tgt_tokens, tgt_spatial, tgt_feat = model.encode(l_flat)
-                L_tgt = tgt_tokens.shape[1]
-                tgt_tokens = tgt_tokens.reshape(B, nl, L_tgt, D)
+                # Reshape each level: [B*ng, N, D] → [B, ng, N, D]
+                ctx_tokens_by_level = [
+                    t.reshape(B, ng, L_ctx, D) for t in ctx_tokens_list
+                ]
 
-                # -- Predict: first global crop → all local crops ------
-                ctx_for_pred = ctx_tokens[:, 0, :, :]       # [B, L_ctx, D]
-                ctx_boxes_for_pred = global_boxes[:, 0, :]   # [B, 4]
+                # ── Encode local crops (target) ──
+                tgt_tokens_list, _, _ = model.encode(l_flat)
+                L_tgt = tgt_tokens_list[0].shape[1]
 
-                pred_dense_list: list[torch.Tensor] = []
-                for li in range(nl):
-                    tgt_box = local_boxes[:, li, :]                # [B, 4]
-                    pd, pp = model.predictor(
-                        ctx_for_pred, ctx_boxes_for_pred, tgt_box, L_tgt
-                    )
-                    pred_dense_list.append(pd)
+                tgt_tokens_by_level = [
+                    t.reshape(B, nl, L_tgt, D) for t in tgt_tokens_list
+                ]
 
-                # Stack along view dim then flatten to preserve [b0_v0, b0_v1, ..., b1_v0, ...] order
-                pred_dense = torch.stack(pred_dense_list, dim=1)  # [B, nl, L_tgt, D]
-                pred_dense = pred_dense.reshape(B * nl, L_tgt, D)  # [B*nl, L_tgt, D]
+                # ── Multi-level prediction loss ──
+                inv_loss = torch.tensor(0.0, device=device)
+                ctx_boxes_for_pred = global_boxes[:, 0, :]  # [B, 4]
 
-                # -- Compute losses ------------------------------------
-                # 1. Invariance = MSE between predicted and target tokens
-                tgt_flat = tgt_tokens.reshape(B * nl, L_tgt, D)
-                inv_loss = F.mse_loss(pred_dense, tgt_flat)
+                # Compute distance weights once (same across levels)
+                dist_weights = compute_distance_weights(
+                    ctx_boxes_for_pred, local_boxes
+                )  # [B, nl, L_tgt]
 
-                # 2. SIGReg on ALL projected tokens
+                for level_idx in range(num_levels):
+                    ctx_tokens = ctx_tokens_by_level[level_idx]   # [B, ng, L_ctx, D]
+                    tgt_tokens = tgt_tokens_by_level[level_idx]   # [B, nl, L_tgt, D]
+
+                    # Predict: first global crop → all local crops
+                    ctx_for_pred = ctx_tokens[:, 0, :, :]  # [B, L_ctx, D]
+
+                    pred_dense_list = []
+                    for li in range(nl):
+                        tgt_box = local_boxes[:, li, :]  # [B, 4]
+                        pd, _ = model.predictors[level_idx](
+                            ctx_for_pred, ctx_boxes_for_pred, tgt_box, L_tgt
+                        )
+                        pred_dense_list.append(pd)
+
+                    pred_dense = torch.stack(pred_dense_list, dim=1)  # [B, nl, L_tgt, D]
+
+                    # V-JEPA 2.1: distance-weighted MSE
+                    tgt_flat = tgt_tokens.reshape(B * nl, L_tgt, D)
+                    pred_flat = pred_dense.reshape(B * nl, L_tgt, D)
+                    level_mse = F.mse_loss(pred_flat, tgt_flat, reduction='none')  # [B*nl, L_tgt, D]
+
+                    # Apply distance weights: weight per target token
+                    w = dist_weights.reshape(B * nl, L_tgt, 1)  # [B*nl, L_tgt, 1]
+                    level_loss = (level_mse * w).mean()
+
+                    # Level weighting: earlier layers get lower weight
+                    level_weight = 1.0 / (2 ** (num_levels - 1 - level_idx))
+                    inv_loss = inv_loss + level_weight * level_loss
+
+                inv_loss = inv_loss / num_levels
+
+                # ── SIGReg on ALL projected tokens (last level only) ──
+                last_ctx = ctx_tokens_by_level[-1]  # [B, ng, L_ctx, D]
+                last_tgt = tgt_tokens_by_level[-1]  # [B, nl, L_tgt, D]
                 all_tokens = torch.cat(
                     [
-                        ctx_tokens.reshape(B * ng * L_ctx, D),
-                        tgt_tokens.reshape(B * nl * L_tgt, D),
+                        last_ctx.reshape(B * ng * L_ctx, D),
+                        last_tgt.reshape(B * nl * L_tgt, D),
                     ],
                     dim=0,
                 )
                 sigreg_loss_val = sigreg_loss_fn(all_tokens)
 
-                # 3. Combined LeJEPA loss
+                # ── Combined loss ──
                 loss = (1.0 - lamb) * inv_loss + lamb * sigreg_loss_val
 
             # -- Backward ----------------------------------------------

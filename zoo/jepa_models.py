@@ -1,10 +1,13 @@
 """
-DenseLeJEPA model: encoder + projection + predictor.
+DenseLeJEPA model with V-JEPA 2.1 innovations:
+1. Deep self-supervision (multi-level losses)
+2. Distance-weighted context loss coefficients
 
-Pure JEPA + SIGReg on raw grayscale images. No Frangi, no teacher distillation.
+Combined with LeJEPA SIGReg for collapse prevention.
 """
 
-from typing import Optional, Tuple
+import math
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -42,16 +45,14 @@ class ProjectionHead(nn.Module):
 class PredictionHead(nn.Module):
     """
     Dense predictor: context features → target token predictions.
-
-    Uses attention pooling over context tokens based on target bounding box,
-    then MLP to predict target tokens.
+    Uses attention pooling over context tokens based on target bounding box.
     """
 
     def __init__(self, proj_dim: int = 256, num_heads: int = 4):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = proj_dim // num_heads
-        assert proj_dim % num_heads == 0, "proj_dim must be divisible by num_heads"
+        assert proj_dim % num_heads == 0
 
         self.q_proj = nn.Linear(proj_dim, proj_dim)
         self.k_proj = nn.Linear(proj_dim, proj_dim)
@@ -107,17 +108,83 @@ class PredictionHead(nn.Module):
         return pred, attn_weights.squeeze(2)
 
 
+def compute_distance_weights(
+    ctx_boxes: torch.Tensor,
+    tgt_boxes: torch.Tensor,
+    num_patches_h: int = 16,
+    num_patches_w: int = 16,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    V-JEPA 2.1 distance-weighted loss coefficients.
+
+    For each target crop, compute λ_i = λ / sqrt(d_min(i, M))
+    where d_min is the minimum spatial distance from target patch i
+    to any context patch, normalized by patch grid dimensions.
+
+    Args:
+        ctx_boxes: [B, 4] normalized context boxes [y, x, h, w]
+        tgt_boxes: [B, nl, 4] normalized target boxes per crop
+        num_patches_h: height of patch grid (e.g. 16 for 256/16)
+        num_patches_w: width of patch grid
+
+    Returns:
+        weights: [B, nl, N_tgt] distance weights per target token
+    """
+    B, nl, _ = tgt_boxes.shape
+    N_tgt = num_patches_h * num_patches_w
+
+    # Convert normalized box coordinates to patch grid indices
+    # [y, x, h, w] ∈ [0, 1] → patch indices
+    ctx_y = ctx_boxes[:, 0:1]  # [B, 1]
+    ctx_x = ctx_boxes[:, 1:2]
+    ctx_h = ctx_boxes[:, 2:3]
+    ctx_w = ctx_boxes[:, 3:4]
+
+    # Center of context box in patch coords
+    ctx_cy = (ctx_y + ctx_h / 2) * num_patches_h
+    ctx_cx = (ctx_x + ctx_w / 2) * num_patches_w
+
+    # Target grid patch positions
+    patch_y = torch.arange(num_patches_h, device=tgt_boxes.device).float() + 0.5
+    patch_x = torch.arange(num_patches_w, device=tgt_boxes.device).float() + 0.5
+    gy, gx = torch.meshgrid(patch_y, patch_x, indexing='ij')
+    grid = torch.stack([gy, gx], dim=-1)  # [H, W, 2]
+
+    weights = torch.zeros(B, nl, N_tgt, device=tgt_boxes.device)
+    for bi in range(B):
+        for li in range(nl):
+            # Target box center in patch coords
+            tgt_box = tgt_boxes[bi, li]  # [4]
+            tgt_cy = (tgt_box[0] + tgt_box[2] / 2) * num_patches_h
+            tgt_cx = (tgt_box[1] + tgt_box[3] / 2) * num_patches_w
+
+            # Distance from each target patch to context center
+            dist_y = (grid[..., 0] - ctx_cy[bi, 0]) / num_patches_h
+            dist_x = (grid[..., 1] - ctx_cx[bi, 0]) / num_patches_w
+            dist = torch.sqrt(dist_y ** 2 + dist_x ** 2 + eps)
+
+            # V-JEPA 2.1: λ_i = 1 / sqrt(d_min)
+            w = 1.0 / torch.sqrt(dist + eps)
+            weights[bi, li] = w.view(-1)
+
+    return weights  # [B, nl, N_tgt]
+
+
 class DenseLeJepaModel(nn.Module):
     """
-    Dense LeJEPA model.
+    Dense LeJEPA model with V-JEPA 2.1 deep supervision.
 
     Architecture:
-        1. ViT Encoder (grayscale in, patch tokens out)
-        2. Projection Head (d_encoder → proj_dim, L2-normalized)
-        3. Prediction Head (cross-attention over context → predict target)
+        1. ViT/Swin Encoder (grayscale in, patch tokens out)
+        2. Multi-level Projection Heads (one per supervised layer)
+        3. Prediction Heads (one per level) with cross-attention
         4. SIGReg applied externally on projected tokens
 
-    Pure JEPA + SIGReg — no Frangi, no teacher distillation.
+    When deep_supervision=True:
+        - Backbone returns features from multiple layers (out_indices)
+        - Each level has its own projection + prediction head
+        - Loss is summed across levels with distance weights
     """
 
     def __init__(
@@ -126,7 +193,7 @@ class DenseLeJepaModel(nn.Module):
         proj_dim: int = 256,
         in_channels: int = 1,
         deep_supervision: bool = False,
-        deep_supervision_out_indices: Tuple[int, ...] = (2, 3),
+        deep_supervision_out_indices: Tuple[int, ...] = (3, 6, 9, 11),
         predictor_heads: int = 4,
     ):
         super().__init__()
@@ -138,53 +205,88 @@ class DenseLeJepaModel(nn.Module):
         self.backbone = get_backbone(
             encoder_name,
             in_channels=in_channels,
+            return_intermediates=deep_supervision,
             out_indices=deep_supervision_out_indices if deep_supervision else None,
         )
-        self.encoder_dim = self._get_encoder_dim()
 
-        # 2. Projection Head
-        self.projection = ProjectionHead(self.encoder_dim, proj_dim)
+        # Infer encoder dimension for each level
+        self.encoder_dims = self._get_encoder_dims()
+        if deep_supervision:
+            self.num_levels = len(self.encoder_dims)
+        else:
+            self.num_levels = 1
 
-        # 3. Prediction Head
-        self.predictor = PredictionHead(proj_dim, num_heads=predictor_heads)
+        # 2. Projection Heads (one per level for deep supervision)
+        self.projections = nn.ModuleList([
+            ProjectionHead(dim, proj_dim)
+            for dim in self.encoder_dims
+        ])
 
-    def _get_encoder_dim(self) -> int:
+        # 3. Prediction Heads (one per level)
+        self.predictors = nn.ModuleList([
+            PredictionHead(proj_dim, num_heads=predictor_heads)
+            for _ in range(self.num_levels)
+        ])
+
+    def _get_encoder_dims(self) -> List[int]:
+        """Determine encoder output dimension(s) via forward pass."""
         with torch.no_grad():
             dummy = torch.zeros(1, self.in_channels, 224, 224)
-            if self.deep_supervision:
-                out = self.backbone(dummy)
-                if isinstance(out, (list, tuple)):
-                    return out[-1].shape[-1]
             out = self.backbone(dummy)
+
             if isinstance(out, (list, tuple)):
-                return out[0].shape[-1] if out[0].dim() == 3 else out[-1].shape[-1]
-            if out.dim() == 4:
-                return out.shape[1]
-            return out.shape[-1]
+                dims = []
+                for o in out:
+                    if o.dim() == 4:
+                        # Feature map [B, C, H, W] → flatten tokens → dim = C
+                        dims.append(o.shape[1])
+                    else:
+                        # Token [B, N, D]
+                        dims.append(o.shape[-1])
+                return dims
+            else:
+                if out.dim() == 4:
+                    return [out.shape[1]]
+                return [out.shape[-1]]
 
     def encode(
         self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[
+        List[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[List[torch.Tensor]],
+    ]:
         """
-        Encode input and project to dense token space.
+        Encode input and project to dense tokens at each level.
 
         Args:
-            x: [B, 1, H, W] — grayscale input
+            x: [B, 1, H, W]
 
         Returns:
-            tokens:  [B, N, proj_dim] — projected patch tokens
+            tokens_list: list of [B, N, proj_dim] per level
             spatial: None
-            feats:   [B, N, d_encoder] — raw encoder features
+            feats_list: list of raw features per level
         """
-        feats = self.backbone(x)
+        feats = self.backbone(x)  # single tensor or list
 
-        if isinstance(feats, (list, tuple)):
-            feats = feats[-1]
+        if not isinstance(feats, (list, tuple)):
+            feats = [feats]
 
-        tokens = self.projection(feats)
+        # Reshape feature maps to tokens if needed (conv backbones)
+        token_feats = []
+        for f in feats:
+            if f.dim() == 4:
+                B, C, Hf, Wf = f.shape
+                f = f.reshape(B, C, Hf * Wf).transpose(1, 2)  # [B, N, C]
+            token_feats.append(f)
 
-        return tokens, None, feats
+        # Project each level
+        tokens_list = []
+        for i, f in enumerate(token_feats):
+            tokens_list.append(self.projections[i](f))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tokens, _, _ = self.encode(x)
-        return tokens
+        return tokens_list, None, token_feats
+
+    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        tokens_list, _, _ = self.encode(x)
+        return tokens_list  # list of [B, N, proj_dim]
