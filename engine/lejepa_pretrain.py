@@ -36,7 +36,13 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from data.dataloader import LeJepaDenseDataset  # noqa: E402
-from data.frangi_cache import FrangiCache, precompute_all  # noqa: E402
+try:
+    from data.frangi_cache import FrangiCache, precompute_all  # noqa: E402
+    _HAS_FRANGI_CACHE = True
+except ImportError:
+    FrangiCache = None
+    precompute_all = None
+    _HAS_FRANGI_CACHE = False
 from zoo.jepa_models import DenseLeJepaModel  # noqa: E402
 from zoo.sigreg import SIGRegLoss  # noqa: E402
 from utils.helpers import set_seed  # noqa: E402
@@ -95,15 +101,18 @@ def _to_three_channels(x: torch.Tensor) -> torch.Tensor:
 
 
 def _build_dataset(cfg: dict):
-    """Build :class:`LeJepaDenseDataset` and :class:`FrangiCache` from config."""
+    """Build :class:`LeJepaDenseDataset` from config; FrangiCache is optional."""
     data_cfg = cfg["data"]
     input_size = int(cfg["model"]["input_size"])
     max_samples = data_cfg.get("max_samples", "all")
+    use_frangi = bool(data_cfg.get("use_frangi", False))
 
-    frangi_cache = FrangiCache(
-        cache_dir=data_cfg["frangi_cache_dir"],
-        image_size=input_size,
-    )
+    frangi_cache = None
+    if use_frangi and _HAS_FRANGI_CACHE:
+        frangi_cache = FrangiCache(
+            cache_dir=data_cfg["frangi_cache_dir"],
+            image_size=input_size,
+        )
 
     dataset = LeJepaDenseDataset(
         base_dataset_json=data_cfg["base_dataset_json"],
@@ -115,7 +124,7 @@ def _build_dataset(cfg: dict):
         local_size=int(data_cfg.get("local_size", 96)),
         max_jitter=int(data_cfg.get("max_jitter", 4)),
         num_vessel_classes=int(data_cfg.get("num_vessel_classes", 26)),
-        use_frangi=bool(data_cfg.get("use_frangi", True)),
+        use_frangi=use_frangi,
         frangi_cache=frangi_cache,
         max_samples=max_samples,
     )
@@ -378,10 +387,11 @@ def train(config_path: str) -> None:
     with open(log_dir / "config.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
 
-    # ── Frangi cache warmup (one-time before any epoch) ───────────────
-    print("[FrangiCache] Precomputing Frangi responses for all samples...")
-    precompute_all(dataset.samples, frangi_cache)
-    print("[FrangiCache] Precomputation complete.")
+    # ── Frangi cache warmup (only when Frangi is enabled) ─────────────
+    if frangi_cache is not None:
+        print("[FrangiCache] Precomputing Frangi responses for all samples...")
+        precompute_all(dataset.samples, frangi_cache)
+        print("[FrangiCache] Precomputation complete.")
 
     writer = SummaryWriter(log_dir=str(log_dir))
 

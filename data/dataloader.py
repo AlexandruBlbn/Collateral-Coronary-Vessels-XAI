@@ -13,13 +13,12 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 
-from data.frangi_cache import FrangiCache
+
 
 class LeJepaDenseDataset(Dataset):
     def __init__(self, base_dataset_json, crops_json_path, root_dir='.',
                  num_global=2, num_local=4, global_size=224, local_size=96, max_jitter=4,
                  num_vessel_classes=26, use_frangi: bool = True,
-                 frangi_cache: FrangiCache | None = None,
                  max_samples: int | str = "all"):
         """
         Dataloader engineered for Dense LeJEPA using pre-computed exact coordinate pools.
@@ -32,7 +31,6 @@ class LeJepaDenseDataset(Dataset):
         self.max_jitter = max_jitter
         self.num_vessel_classes = num_vessel_classes
         self.use_frangi = use_frangi
-        self.frangi_cache = frangi_cache
 
         # We load base to know the splits, but we only really care about train pretraining
         with open(base_dataset_json, 'r') as f:
@@ -105,19 +103,16 @@ class LeJepaDenseDataset(Dataset):
         img_t = torch.from_numpy(img).float().unsqueeze(0) / 255.0
         img_t = img_t * 2.0 - 1.0 # [-1, 1] normalization
 
-        # MODIFIED: add Frangi as a second channel when available; otherwise duplicate grayscale.
+        # Single-channel [1, H, W] for pure JEPA + SIGReg.
+        # When use_frangi=True, a second Frangi channel is added for distillation.
         if self.use_frangi and self.frangi_cache is not None:
-            frangi_map = self.frangi_cache.get(item['path'])  # [cache_size, cache_size] tensor
-            # Resize Frangi to match the current grayscale image dimensions
-            frangi_map = frangi_map.unsqueeze(0).unsqueeze(0)  # [1, 1, H_f, W_f]
+            frangi_map = self.frangi_cache.get(item['path'])
+            frangi_map = frangi_map.unsqueeze(0).unsqueeze(0)
             frangi_map = F.interpolate(frangi_map, size=(img_h, img_w), mode='bilinear', align_corners=False)
-            frangi_map = frangi_map.squeeze(0).squeeze(0)  # [img_h, img_w]
-            frangi_map = frangi_map.to(img_t.device, dtype=img_t.dtype)  # match device/dtype
-            # img_t is currently [1, img_h, img_w], frangi_map is [img_h, img_w]
-            img_t = torch.cat([img_t, frangi_map.unsqueeze(0)], dim=0)  # → [2, img_h, img_w]
-        else:
-            # Still produce 2 channels (grayscale duplicated) for consistent model input
-            img_t = img_t.repeat(2, 1, 1)  # → [2, H, W]
+            frangi_map = frangi_map.squeeze(0).squeeze(0)
+            frangi_map = frangi_map.to(img_t.device, dtype=img_t.dtype)
+            img_t = torch.cat([img_t, frangi_map.unsqueeze(0)], dim=0)  # [2, H, W]
+        # else: img_t stays as [1, H, W] — single-channel grayscale
         
         g_candidates = [dict(c) for c in meta['global_crops']]
         l_candidates = [dict(c) for c in meta['local_crops']]
