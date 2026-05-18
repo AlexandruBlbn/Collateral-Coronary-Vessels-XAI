@@ -1,0 +1,16 @@
+{
+  "data": "data\\extra\\trainB\\100.png",
+  "label": "data\\frangi_pseudolabels\\accepted\\trainB_100_frangi.png",
+  "params": {
+    "sigma_min": 1,
+    "sigma_max": 5.95,
+    "beta": 0.73,
+    "c": 21.6,
+    "percentile": 79,
+    "min_area": 200,
+    "invert": true,
+    "denoise": true,
+    "clahe": true,
+    "tophat": true
+  }
+}

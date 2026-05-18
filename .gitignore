@@ -1,4 +1,3 @@
-
 data/ARCADE/Test/
 data/ARCADE/train/
 data/ARCADE/Validation/
@@ -45,4 +44,6 @@ roo
 skills
 setup_git_and_requirements.sh
 .github
-.gitignore
+!.opencode/
+!.opencode/skills/**
+!.opencode/*.json
