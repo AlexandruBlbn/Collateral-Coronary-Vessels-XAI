@@ -47,3 +47,7 @@ setup_git_and_requirements.sh
 !.opencode/
 !.opencode/skills/**
 !.opencode/*.json
+web_demo/results
+web_demo/encrypted
+web_demo/status
+web_demo/uploads
