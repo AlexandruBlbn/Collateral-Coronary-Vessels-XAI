@@ -25,16 +25,21 @@ data/XCAD
 micelanios
 data/Segmentation Data/
 data/ARCADE/Unprocessed
-results
 data/Extra
 .hf_cache
 BestWeights
+
+results/
 engine/git-error-1771093693213
 rezultate_convnet
 rezultate_effinet
 rezultate_resnet50
 rezultate
 results
+
+# VasoJEPA — structure, but ignore heavy data and checkpoints
+checkpoints/
+!checkpoints/.gitkeep
 XA-170K
 DenseLeJepa
 XA-SSL-REPO
@@ -51,3 +56,4 @@ web_demo/results
 web_demo/encrypted
 web_demo/status
 web_demo/uploads
+diverse.txt
