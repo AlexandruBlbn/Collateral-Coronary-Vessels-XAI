@@ -15,7 +15,7 @@
 
 ## Overview
 
-**VasoJEPA v2** is a novel self-supervised learning framework for coronary X-ray angiography. It builds on the JEPA (Joint Embedding Predictive Architecture) paradigm with three key innovations:
+**Angio-JEPA ** is a novel self-supervised learning framework for coronary X-ray angiography. It builds on the JEPA (Joint Embedding Predictive Architecture) paradigm with three key innovations:
 
 1. **EMA-free architecture** — No teacher network. Collapse is prevented by the CGLT regularizer (from UR-JEPA), cutting parameters and memory by ~50%.
 2. **Manifold-aligned regularization** — Replaces SIGReg's isotropic Gaussian target with CGLT's uniform n-rectifiability, matching the intrinsically low-dimensional structure of coronary vessels.
