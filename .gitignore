@@ -56,7 +56,6 @@ web_demo/results
 web_demo/encrypted
 web_demo/status
 web_demo/uploads
-diverse.txt
 plan_implementare.md
 vasojepa_arhitecture.md
 plan_implementare.md
@@ -66,3 +65,4 @@ vasojepa_synthesis.md
 vasojepa_v2_publication.md
 vasojepa_architecture.md
 plan_implementare.md
+.opencode
