@@ -26,39 +26,7 @@
 
 ---
 
-## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                  VasoJEPA v2 (EMA-free)                      │
-├──────────────────────────────────────────────────────────────┤
-│  Input: Angiogram 224×224 → 196 patches                     │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │  ONLINE ENCODER (ViT-S/16) — the ONLY encoder          │  │
-│  │  Layer 4 → f₄  |  Layer 8 → f₈  |  Layer 12 → f₁₂    │  │
-│  └────────────────────────────────────────────────────────┘  │
-│         │                                                    │
-│  ═══════════════ THREE BRANCHES ════════════════════════     │
-│                                                              │
-│  BRANCH 1: Dense Predictor (main learning signal)            │
-│  ├─ Targets: f₄, f₈, f₁₂ with stop_gradient (.detach())     │
-│  ├─ Context: 50% visible patches from f₁₂                    │
-│  ├─ Predictor: 4-block ViT → ALL 196 positions               │
-│  └─ Loss: Vessel-weighted MSE (weight = 1 + β·score)         │
-│                                                              │
-│  BRANCH 2: CGLT Regularizer (collapse prevention)            │
-│  ├─ Projector MLP: 384 → 2048 → 2048 → D=32                 │
-│  ├─ CGLT Carleson loss + AD anchor (n=7, K=5)                │
-│  └─ Modulated: weight = (1 - α·vessel_score)                 │
-│                                                              │
-│  BRANCH 3: Latent Denoising Score — LDS (vessel prior)       │
-│  ├─ Denoiser: MLP with T=50 diffusion steps                  │
-│  ├─ Vessel head: MLP → vessel_score ∈ [0,1]                  │
-│  └─ Guidance: soft BCE vs Robust Consensus Prior (annealed)  │
-│                                                              │
-│  L = 1.0·L_dense + 0.02·10³·(L_CGLT + 0.1·L_AD) + 0.2·L_lds│
-└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Why EMA-free?
@@ -71,15 +39,6 @@
 
 ---
 
-## Key Innovations
-
-| Contribution | Description | Novelty |
-|-------------|-------------|:-------:|
-| **C1** | First application of UR-JEPA / CGLT to medical imaging | High |
-| **C2** | EMA-free dense JEPA for coronary angiograms | Medium-High |
-| **C3** | Anatomy-adaptive CGLT (vessel-modulated n-rectifiability) | **Very High** |
-| **C4** | LDS branch with Robust Consensus Prior + guidance annealing | High |
-| **C5** | Diagnosis: SIGReg fails on sparse tubular structures | Medium |
 
 ---
 
@@ -152,21 +111,6 @@
 
 ## Implementation Status
 
-| Component | File | Status |
-|-----------|------|:------:|
-| Robust Consensus Prior (RCP) | `XA-SSL-REPO/robust_prior.py` | ✅ Done & tested |
-| ViT-S/16 Encoder | `XA-SSL-REPO/vasojepa/encoder.py` | ✅ Done |
-| Dense Predictor | `XA-SSL-REPO/vasojepa/predictor.py` | ✅ Done |
-| Latent Denoising Score | `XA-SSL-REPO/vasojepa/lds.py` | ✅ Done |
-| SIGReg (ablation baseline) | `XA-SSL-REPO/vasojepa/sigreg.py` | ✅ Done |
-| Dataset loader | `XA-SSL-REPO/vasojepa/dataset.py` | ✅ Done |
-| Unit tests | `XA-SSL-REPO/test_model.py` | ✅ Done |
-| **CGLT Regularizer** | `XA-SSL-REPO/vasojepa/cglt.py` | ❌ **NEXT** |
-| **EMA-free model redesign** | `XA-SSL-REPO/vasojepa/model.py` | ❌ **NEXT** |
-| **Training script** | `XA-SSL-REPO/train.py` | ❌ Not started |
-| **Ablation framework** | `XA-SSL-REPO/ablation_runner.py` | ❌ Not started |
-
----
 
 ## Setup
 
