@@ -11,17 +11,6 @@ def load_data(path):
     return data
 
 
-data = load_data(paths["Finetunning"]) #train/val/test -> stenoza/syntax -> 1-n -> data/label
-# split = "train"
-# task = "stenoza"
-# test = []
-# for pacienti in data[split][task]:
-#    test.append(data[split][task][pacienti])
-# for i in range(1):
-#     print(test[i])
-
-
-
 class finetune_dataset(Dataset):
     def __init__(self, path=paths["Finetunning"], split="train", task='stenoza', transform=[]):
         '''
@@ -85,26 +74,6 @@ class finetune_dataset(Dataset):
         
         return image, label
     
-    
-
-
-pretrain = load_data(paths["Pretraining"])
-pacienti = {}
-
-for splits in pretrain:
-    pacienti[splits] = pretrain[splits]
-    print(f"Split: {splits}, total: {len(pretrain[splits])}")
-
-for pacient in pacienti["cadica"].values():
-    print(pacient)
-    break
-
-#     print(f"Split: {splits}, total: {len(pretrain[splits])}")
-# Split: cadica, total: 6594
-# Split: coronarydominance, total: 160320
-# Split: syntax, total: 2943
-# Split: xcad, total: 1621    
-
 
 class pretrain_dataset(Dataset):
     def __init__(self, path=paths["Pretraining"], split=None, transform=None):
@@ -115,22 +84,67 @@ class pretrain_dataset(Dataset):
         
         if split is None:
             for splits in self.data:
-                pacienti = self.data[splits]
-                self.samples.append(pacienti)
+                for pacient_id, image_path in self.data[splits].items():
+                    self.samples.append(image_path)
   
-                    
+        if split is not None:
+            for patient_id, image_path in self.data[split].items():
+                self.samples.append(image_path)
+            
+    def __len__(self):
+        return len(self.samples)
     
-# if __name__ == "__main__":
-#     dataset = finetune_dataset(split="train", task="syntax")
-#     #no transforms passed, so the images and labels will be returned as PIL images.
-#     for image, label in dataset:
-#         figure = plt.figure(figsize=(10, 5))
-#         figure.add_subplot(1, 2, 1)
-#         plt.imshow(image)
-#         figure.add_subplot(1, 2, 2)
-#         plt.imshow(label)
-#         plt.show()
-#         break
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        image = Image.open(sample).convert("L")
+        
+        if self.transform:
+            image = self.transform(image)
+            
+        return image
+    
     
 
+
+  
+                    
+
         
+# pretrain = load_data(paths["Pretraining"])
+# pacienti = {}
+
+# for splits in pretrain:
+#     pacienti[splits] = pretrain[splits]
+#     print(f"Split: {splits}, total: {len(pretrain[splits])}")
+
+# for pacient in pacienti["cadica"].values():
+#     print(pacient)
+#     break
+#data/pretrain/dataset/cadica/1.png
+
+# for splits in pretrain:
+#     pacienti[splits] = pretrain[splits]
+
+# for i in range(1):    
+#     print(pacienti["syntax"])
+#     break
+#'2943': 'data/pretrain/dataset/syntax/2943.png
+
+
+#     print(f"Split: {splits}, total: {len(pretrain[splits])}")
+# Split: cadica, total: 6594
+# Split: coronarydominance, total: 160320
+# Split: syntax, total: 2943
+# Split: xcad, total: 1621    
+
+
+
+# data = load_data(paths["Finetunning"]) #train/val/test -> stenoza/syntax -> 1-n -> data/label
+# # split = "train"
+# # task = "stenoza"
+# # test = []
+# # for pacienti in data[split][task]:
+# #    test.append(data[split][task][pacienti])
+# # for i in range(1):
+# #     print(test[i])
+
