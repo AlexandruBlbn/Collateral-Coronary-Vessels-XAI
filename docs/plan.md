@@ -12,8 +12,8 @@
 
 ### Phase 1: Robust Consensus Prior (RCP) Generation
 Because the Latent Denoising Score (LDS) branch uses a soft vesselness map to guide representation learning, you need prior scores.
-- [ ] **Task 1.1**: Create `utils/robust_prior.py` with multi-filter voting (Frangi + Sato + Hessian consensus) to filter out catheters and ribs.
-- [ ] **Task 1.2**: Create a pre-processing script `precompute_priors.py` to batch-process all pretraining images offline and save the RCP maps.
+- [x] **Task 1.1**: `utils/vessels_prior.py` — Sato + Meijering consensus with morphological opening and small-object removal. Includes FOV mask (auto-detects black X-ray intensifier border and erodes 15px inward to kill gradient false positives).
+- [x] **Task 1.2**: `precompute_priors.py` — multiprocessing batch script. Outputs: `float16` `.npy` at 14×14 patch resolution (~67 MB for all 170k images). Mirrors image paths: `data/pretrain/dataset/cadica/1.png` → `data/pretrain/priors/cadica/1.npy`. Also includes a verification and plotting utility `visualize_prior.py` for debugging.
 - [ ] **Task 1.3**: Update `data/data.py` to load precomputed RCP maps during pre-training.
 
 ### Phase 2: Core Model Components (`vasojepa/`)

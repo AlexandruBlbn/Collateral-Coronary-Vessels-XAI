@@ -14,7 +14,7 @@ def load_data(path):
 class finetune_dataset(Dataset):
     def __init__(self, path=paths["Finetunning"], split="train", task='stenoza', transform=[]):
         '''
-        RETURNS: No tranforms - PIL images, with tranforms: tensors - image, label.
+        RETURNS: No tranforms - PIL images, with tranforms: tensors - image, label. 
         Special Args:
             tranforms: A dictionary of transforms for the data and label. The keys should be "data" and "label" respectively.
             See implementation of data/data.py in __getitem__ for an example of how to pass the transforms.
@@ -91,23 +91,58 @@ class pretrain_dataset(Dataset):
         if split is not None:
             for patient_id, image_path in self.data[split].items():
                 self.samples.append(image_path)
+                
+        self.priors = []
+        for idx in range(len(self.samples)):
+            if split is None:
+                for splits in self.data:
+                    priors_path = f"data/pretrain/priors/{splits}/{idx+1}.npy"
+                    priors_path = priors_path.replace("\\", "/")
+                    self.priors.append(priors_path)
+            else: 
+                priors_path = f"data/pretrain/priors/{split}/{idx+1}.npy"
+                priors_path = priors_path.replace("\\", "/")
+                self.priors.append(priors_path)
             
     def __len__(self):
         return len(self.samples)
     
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        priors = self.priors[idx]
         image = Image.open(sample).convert("L")
+        prior = np.load(priors).astype(np.float32)
+        priors = Image.fromarray(priors)
         
         if self.transform:
             image = self.transform(image)
+            priors = self.transform(priors)
             
-        return image
+        return image, priors
     
     
 
+if __name__ == "__main__":
+    # set_seed()
+    # pretrain = pretrain_dataset()
+    # for image, priors in pretrain:
+    #     plt.figure(figsize=(10, 5))
+    #     plt.subplot(1, 2, 1)
+    #     plt.imshow(image, cmap='gray')
 
-  
+    #     plt.subplot(1, 2, 2)
+    #     plt.imshow(priors, cmap='gray')
+    #     plt.show()
+    #     break
+    
+    priors = np.load("data/pretrain/priors/cadica/.npy")
+
+    print(f"Shape: {priors.shape}")
+    print(f"Dtype: {priors.dtype}")
+    print(f"Min: {priors.min()}")
+    print(f"Max: {priors.max()}")
+    print(f"Mean: {priors.mean()}")
+    
                     
 
         
