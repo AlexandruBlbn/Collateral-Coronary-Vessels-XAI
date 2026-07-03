@@ -14,6 +14,7 @@ def load_data(path):
 class finetune_dataset(Dataset):
     def __init__(self, path=paths["Finetunning"], split="train", task='stenoza', transform=[]):
         '''
+        RETURNS: No tranforms - PIL images, with tranforms: tensors - image, label.
         Special Args:
             tranforms: A dictionary of transforms for the data and label. The keys should be "data" and "label" respectively.
             See implementation of data/data.py in __getitem__ for an example of how to pass the transforms.
@@ -70,7 +71,7 @@ class finetune_dataset(Dataset):
         
         if self.transform:
             image = self.transform["data"](image)
-            label = self.transform["label"](label)
+            label = self.transform["label"](label) 
         
         return image, label
     
