@@ -18,8 +18,8 @@ Because the Latent Denoising Score (LDS) branch uses a soft vesselness map to gu
 
 ### Phase 2: Core Model Components (`vasojepa/`)
 Create the sub-package directory `vasojepa` and implement its modular architecture.
-- [ ] **Task 2.1**: Initialize `vasojepa/__init__.py`.
-- [ ] **Task 2.2**: Implement `vasojepa/encoder.py` using a `timm` ViT-S/16 wrapper to extract features at layers 4, 8, and 12.
+- [x] **Task 2.1**: Initialize `vasojepa/__init__.py`.
+- [x] **Task 2.2**: Implement `vasojepa/encoder.py` using a `timm` ViT-S/16 wrapper to extract features at layers 4, 8, and 12.
 - [ ] **Task 2.3**: Implement `vasojepa/predictor.py` with a 4-block lightweight dense predictor that projects visible patches to all 196 patch positions.
 - [ ] **Task 2.4**: Implement `vasojepa/cglt.py` containing the uniform n-rectifiability Carleson loss and its MLP projection heads.
 - [ ] **Task 2.5**: Implement `vasojepa/lds.py` containing the Latent Denoising Score (diffusion denoiser + vessel classification head).
