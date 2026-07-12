@@ -8,7 +8,7 @@ import yaml
 import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
+import math as math
 import torch
 import torch.nn as nn
 import torch.nn.functional as torch_f
@@ -35,5 +35,5 @@ __all__ = [
     "set_seed", "torch", "nn", "torch_f", "Dataset", "DataLoader", "transforms",
     "np", "timm", "cv2", "nib", "Image", "tqdm", "plt",
     "os", "sys", "json", "re", "csv", "yaml", "random", "Path",
-    "Dict", "List", "Optional", "Tuple"
+    "Dict", "List", "Optional", "Tuple", 'math'
 ]

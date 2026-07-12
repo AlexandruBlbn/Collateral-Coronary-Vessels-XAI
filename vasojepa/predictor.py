@@ -25,9 +25,9 @@ class Predictor(nn.Module):
         B, N_ctx, _ = context_tokens.shape
         target = self.mask_tokens.expand(B, N_tgt, -1)
         output = self.transformer(src=search, tgt=target)
-        output = self.output_projection(output)
+        output_f2 = self.output_projection(output)
         output_f3 = self.head_f3(output)
-        return output, output_f3
+        return output_f2, output_f3
     
     
     
