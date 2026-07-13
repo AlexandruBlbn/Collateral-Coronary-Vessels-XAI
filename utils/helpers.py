@@ -21,6 +21,7 @@ import nibabel as nib
 from PIL import Image
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -35,5 +36,5 @@ __all__ = [
     "set_seed", "torch", "nn", "torch_f", "Dataset", "DataLoader", "transforms",
     "np", "timm", "cv2", "nib", "Image", "tqdm", "plt",
     "os", "sys", "json", "re", "csv", "yaml", "random", "Path",
-    "Dict", "List", "Optional", "Tuple", 'math'
+    "Dict", "List", "Optional", "Tuple", 'math', 'F'
 ]
