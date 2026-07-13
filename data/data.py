@@ -1,4 +1,5 @@
 from utils.helpers import *
+import torchvision.transforms.functional as TF
 
 paths = {
     "Finetunning": r"data\ARCADE\processed\dataset.json",
@@ -108,17 +109,23 @@ class pretrain_dataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        priors = self.priors[idx]
-        image = Image.open(sample).convert("L")
-        prior = np.load(priors).astype(np.float32)
-        priors = Image.fromarray(priors)
-        
-        if self.transform:
-            image = self.transform(image)
-            priors = self.transform(priors)
-            
-        return image, priors
+        image = Image.open(self.samples[idx]).convert("L")
+        prior = np.load(self.priors[idx]).astype(np.float32)   # [14, 14], values in [0, 1]
+
+        # Synchronized horizontal flip
+        if random.random() > 0.5:
+            image = TF.hflip(image)
+            prior = np.fliplr(prior).copy()
+
+        # Image: resize -> tensor -> normalize
+        image = TF.resize(image, [224, 224])
+        image = TF.to_tensor(image)                            # [1, 224, 224]
+        image = TF.normalize(image, mean=[0.5], std=[0.5])
+
+        # Prior: numpy -> tensor, no normalization (already [0, 1])
+        prior = torch.from_numpy(prior)                        # [14, 14]
+
+        return image, prior
     
     
 
