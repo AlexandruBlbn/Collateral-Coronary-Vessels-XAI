@@ -63,8 +63,9 @@ class LDSBranch(nn.Module):
         vessel_logits = self.vessel_head(z_denoised)
         prior_flat = prior.reshape(B*N, 1)
         loss_vessel = F.binary_cross_entropy_with_logits(vessel_logits, prior_flat)
-        
-        return loss_denoised + lambda_ * loss_vessel
+
+        vessel_score = torch.sigmoid(vessel_logits).reshape(B, N)  # [B, N], values in [0, 1]
+        return loss_denoised + lambda_ * loss_vessel, vessel_score
 
 
         
