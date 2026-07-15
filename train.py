@@ -91,7 +91,7 @@ def load_checkpoint(model, optimizer, path):
 def train_one_epoch(model, loader, optimizer, epoch, total_epochs):
     model.train()
     total_loss = 0.0
-    opt_steps  = 0
+    n_batches  = 0
     last_x     = None
     last_prior = None
 
@@ -109,19 +109,20 @@ def train_one_epoch(model, loader, optimizer, epoch, total_epochs):
 
         (loss / ACCUM_STEPS).backward()
 
+        total_loss += loss.item()
+        n_batches  += 1
+        pbar.set_postfix(
+            loss=f"{loss.item():.3f}",
+            dense=f"{loss_dict['dense']:.3f}",
+            cglt=f"{loss_dict['cglt']:.3f}",
+            lds=f"{loss_dict['lds']:.3f}",
+            f2_std=f"{loss_dict['f2_std']:.3f}",
+        )
+
         if (step + 1) % ACCUM_STEPS == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             optimizer.zero_grad()
-            opt_steps += 1
-            total_loss += loss.item()
-
-            pbar.set_postfix(
-                loss=f"{loss.item():.3f}",
-                dense=f"{loss_dict['dense']:.3f}",
-                cglt=f"{loss_dict['cglt']:.3f}",
-                lds=f"{loss_dict['lds']:.3f}",
-            )
 
     # Handle leftover steps (if dataset not divisible by ACCUM_STEPS)
     if (len(loader) % ACCUM_STEPS) != 0:
@@ -129,7 +130,7 @@ def train_one_epoch(model, loader, optimizer, epoch, total_epochs):
         optimizer.step()
         optimizer.zero_grad()
 
-    avg_loss = total_loss / max(opt_steps, 1)
+    avg_loss = total_loss / max(n_batches, 1)
     return avg_loss, last_x, last_prior
 
 

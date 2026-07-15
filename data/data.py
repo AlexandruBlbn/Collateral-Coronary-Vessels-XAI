@@ -93,9 +93,9 @@ class pretrain_dataset(Dataset):
             for patient_id, image_path in self.data[split].items():
                 self.samples.append(image_path)
                 
-        # Derive prior path from sample path: dataset → priors, .png → .npy
+        # Derive prior path from sample path: dataset/ dir -> priors/ dir, .png -> .npy
         self.priors = [
-            s.replace("dataset", "priors").replace(".png", ".npy")
+            re.sub(r"(^|/)dataset(/)", r"\1priors\2", s).rsplit(".", 1)[0] + ".npy"
             for s in self.samples
         ]
             

@@ -5,14 +5,17 @@ from utils.helpers import *
 
 def pairwise_square_distances(A, Z):
     #a2 -2ab +b2
-    A_sqr = (A*A).sum(dim=-1, keepdim=True)
-    Z_sqr = (Z*Z).sum(dim=-1, keepdim=True).t()
-    
-    dot = A @ Z.t()
-    
-    dist = A_sqr - 2*dot + Z_sqr 
-    
-    return dist.clamp_min(min=0.0)
+    with torch.autocast(device_type=A.device.type, enabled=False):
+        A = A.float()
+        Z = Z.float()
+        A_sqr = (A*A).sum(dim=-1, keepdim=True)
+        Z_sqr = (Z*Z).sum(dim=-1, keepdim=True).t()
+
+        dot = A @ Z.t()
+
+        dist = A_sqr - 2*dot + Z_sqr
+
+        return dist.clamp_min(min=0.0)
 
 
 def logarithm_theta(d2, r, d=7):

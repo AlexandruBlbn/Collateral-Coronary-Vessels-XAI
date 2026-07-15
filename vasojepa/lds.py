@@ -48,19 +48,22 @@ class LDSBranch(nn.Module):
         lambda_ = self.get_lambda(epoch, total_epochs)
         B, N, dim = z.shape
         z_flat = z.reshape(B*N, dim)
-        idx = torch.randint(0, len(self.noise_levels), (1,)).item()
-        sigma = self.noise_levels[idx]
+
+        # per-sample noise level, not one value for the whole batch
+        level_idx = torch.randint(0, len(self.noise_levels), (B*N,), device=z.device)
+        levels = torch.tensor(self.noise_levels, device=z.device, dtype=z.dtype)
+        sigma = levels[level_idx].unsqueeze(-1)          # [B*N, 1]
+
         noise = torch.randn_like(z_flat)
-        
         z_noisy = z_flat + sigma * noise
-        
-        sigma_input = torch.full((B*N, 1), sigma, device=z.device, dtype=z.dtype)
-        
-        z_denoised = self.denoiser(z_noisy, sigma_input)
-       
-        loss_denoised = F.mse_loss(z_denoised, z_flat)
-        
-        vessel_logits = self.vessel_head(z_denoised)
+
+        eps_pred = self.denoiser(z_noisy, sigma)
+        loss_denoised = F.mse_loss(eps_pred, noise)
+
+        # recover clean embedding for the vessel head (no grad back into denoiser twice)
+        z_clean = z_noisy - sigma * eps_pred
+
+        vessel_logits = self.vessel_head(z_clean)
         prior_flat = prior.reshape(B*N, 1)
         loss_vessel = F.binary_cross_entropy_with_logits(vessel_logits, prior_flat)
 

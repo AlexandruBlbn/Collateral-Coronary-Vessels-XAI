@@ -12,6 +12,7 @@ class Predictor(nn.Module):
             d_model=pred_dim,
             nhead=n_heads,
             num_encoder_layers=n_layers,
+            num_decoder_layers=n_layers,
             dropout=0,
             batch_first=True,
             activation='gelu'

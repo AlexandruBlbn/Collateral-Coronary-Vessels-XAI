@@ -22,7 +22,7 @@ class Model(nn.Module):
         f0, f1, f2, f3 = self.encoder(x)
         loss_lds, vessel_score = self.lds(f2.detach(), prior, epoch, total_epochs)
         vessel_score = vessel_score.detach()
-        loss_cglt = self.cglt(f2, vessel_score.detach())
+        loss_cglt = self.cglt(f2, vessel_score)
         
         #preparation of the context / target for predicotr
         B, N, dim = f2.shape
@@ -62,5 +62,15 @@ class Model(nn.Module):
 
         loss_dense = ((pred_f2 - target_f2).pow(2) * w).mean() + ((pred_f3 - target_f3).pow(2) * w).mean()
         loss = 1.0 * loss_dense + 20.0 * loss_cglt + 0.2 * loss_lds
-        
-        return loss, {"dense": loss_dense.item(), "cglt": loss_cglt.item(), "lds": loss_lds.item()}
+
+        # collapse monitor: mean per-dim std of the RAW encoder output (pre-CGLT-projection).
+        # if this trends toward 0 while loss_cglt also goes down, the projector head is
+        # "cheating" the uniform-rectifiability loss instead of the encoder actually learning it.
+        f2_std = f2.detach().float().std(dim=(0, 1)).mean().item()
+
+        return loss, {
+            "dense": loss_dense.item(),
+            "cglt": loss_cglt.item(),
+            "lds": loss_lds.item(),
+            "f2_std": f2_std,
+        }
