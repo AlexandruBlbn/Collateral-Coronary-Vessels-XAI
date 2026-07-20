@@ -63,6 +63,7 @@ class CGLTRegularizer(nn.Module):
         B, N, D = f.shape
         f_flat = f.reshape(B * N, -1)
         z = self.proj(f_flat)                        # [B*N, 32]
+        z = F.normalize(z, dim=-1)                    # anchor scale — prevents proj from unboundedly amplifying z
 
         d2 = pairwise_square_distances(z, z)         # [B*N, B*N]
         scales = self.build_scale_ladder(z)          # [K+1]

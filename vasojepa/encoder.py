@@ -19,6 +19,9 @@ class Encoder(nn.Module):
             features_only=True
           )
         
+        self.norm2 = nn.LayerNorm(384)
+        self.norm3 = nn.LayerNorm(576)
+        
     def forward(self, x):
         features = self.model(x)
         features0 = features[0]
@@ -35,6 +38,9 @@ class Encoder(nn.Module):
         f_f1 = features1.permute(0, 2, 3, 1).reshape(B, H1*W1, C1) #C H W B -> B H*W C
         f_f2 = features2.permute(0, 2, 3, 1).reshape(B, H2*W2, C2) #C H W B -> B H*W C
         f_f3 = features3.permute(0, 2, 3, 1).reshape(B, H3*W3, C3) #C H W B -> B H*W C
+        
+        f_f2 = self.norm2(f_f2)
+        f_f3 = self.norm3(f_f3)
         
         return f_f0, f_f1, f_f2, f_f3 
         #
