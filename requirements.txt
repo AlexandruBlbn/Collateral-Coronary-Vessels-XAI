@@ -20,3 +20,4 @@ segmentation_models_pytorch
 torchmetrics
 monai
 einops
+openpyxl
