@@ -5,8 +5,6 @@
 **VasoJEPA: EMA-free JEPA with exogenous vesselness anchor for coronary angiography self-supervised pretraining**
 
 [![Status](https://img.shields.io/badge/status-in%20development-yellow)]()
-[![Target](https://img.shields.io/badge/target-MICCAI%202027-blue)]()
-[![GPU](https://img.shields.io/badge/GPU-16GB%2B-green)]()
 [![Python](https://img.shields.io/badge/python-3.12-blue)]()
 
 </div>
