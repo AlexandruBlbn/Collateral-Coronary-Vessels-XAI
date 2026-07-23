@@ -178,6 +178,3 @@ docs/
 
 This project builds upon [MAE](https://github.com/facebookresearch/mae) (CC-BY-NC 4.0). The XCA-170K dataset is licensed under CC-BY-NC 4.0.
 
-## Target venue
-
-MICCAI 2027 / Medical Image Analysis.
