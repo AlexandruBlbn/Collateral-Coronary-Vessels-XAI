@@ -30,8 +30,11 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True)
 
-# Definim curat interfața publică a acestui modul (fără duplicate)
+
+
 __all__ = [
     "set_seed", "torch", "nn", "torch_f", "Dataset", "DataLoader", "transforms",
     "np", "timm", "cv2", "nib", "Image", "tqdm", "plt",

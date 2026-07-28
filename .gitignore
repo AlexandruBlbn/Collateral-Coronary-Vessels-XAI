@@ -41,6 +41,9 @@ results
 # VasoJEPA — structure, but ignore heavy data and checkpoints
 checkpoints/
 !checkpoints/.gitkeep
+mlruns.db
+mlartifacts/
+paper_draft.md
 XA-170K
 DenseLeJepa
 XA-SSL-REPO
